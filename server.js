@@ -1784,5 +1784,5 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Sage listening on :${PORT} — data in ${DATA_DIR}, AI ${AI_API_KEY ? `on (${AI_PROVIDER}/${AI_MODEL})` : 'off (structure still works)'}`);
+  console.log(`Sage listening on :${PORT} — data in ${DATA_DIR}, AI ${AI_API_KEY ? `on (${AI_PROVIDER})` : 'off (structure still works)'}`);
 });
