@@ -1,0 +1,15 @@
+{
+  "name": "sage",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Regena's intelligent, collaborative personal assistant and thinking partner.",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": "22.x" },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^11.3.0",
+    "express": "^4.21.0",
+    "multer": "^1.4.5-lts.1"
+  }
+}

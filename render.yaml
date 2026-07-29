@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: sage
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: DATA_DIR
+        value: /var/data
+      - key: SESSION_SECRET
+        generateValue: true
+      # Paste the key and nothing else — the provider is detected from the key
+      # and the model is chosen automatically per request. AI_MODEL_FAST and
+      # AI_MODEL_SMART can override the choice if it's ever needed.
+      - key: AI_API_KEY
+        sync: false
+    disk:
+      name: sage-data
+      mountPath: /var/data
+      sizeGB: 1
