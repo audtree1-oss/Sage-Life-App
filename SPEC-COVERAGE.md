@@ -15,7 +15,7 @@ A straight answer to "did it do what the spec said?" — written so Regena
 | **Hosting test** | ✅ verified | A hosting event tomorrow surfaced "Before company arrives → Guest bathroom clean" today. |
 | **Lake test** | ✅ verified | A stated trip activated the 8-step "Before leaving Evans for the lake" checklist the day before departure. |
 | **Opportunity test** | ✅ verified | Publix senior day appeared as eligible on Wednesday only, in the Opportunities view, with no due date and no way to become overdue. |
-| **Display test** | ✅ verified | Large text is the default; checklists over three steps collapse to a single tappable line so Now stays scannable. |
+| **Display test** | ✅ verified | Large text is the default; long checklists collapse to a single tappable line — over three steps on Now, over five on Today — so the immediate list stays scannable. |
 | **Correction test** | ✅ built | Free-text correction on any item: "that isn't urgent, leave it until September" sets the window and target, not a due date. Requires the AI layer. |
 | **Privacy test** | ✅ by design | Items store the task, never the secret. No password, account, or document fields exist to put them in. |
 | **Provider test** | ✅ built | One `askAI()` interface; `AI_PROVIDER=anthropic\|openai`. Records and business logic are untouched by the swap. |
@@ -33,7 +33,7 @@ request and needs no key.
 | MVP-3 Update/complete/defer/correct by language | ✅ done |
 | MVP-4 Today + Morning + This Week views | ✅ done (+ Coming Up) |
 | MVP-5 Trigger engine | ✅ done (day, season, weather, location, event, prerequisite, suppression) |
-| MVP-6 Calendar read + notifications | ✅ done — feed **out** (real phone/watch alerts with prep lead times) and read **in** from iCloud over CalDAV, read-only. Her appointments drive the trigger engine. |
+| MVP-6 Calendar read + notifications | ✅ done — feed **out** (real phone/watch alerts with prep lead times) and read **in** from **both iCloud and Google**, read-only. Her appointments drive the trigger engine. |
 | MVP-7 Opportunities engine | ✅ done |
 | MVP-8 Lake/location workflows + inventory | ✅ done |
 | MVP-9 Weather-aware triggers | ✅ done |
@@ -47,7 +47,7 @@ request and needs no key.
 | Backend + cost | Node/Express + SQLite on a Render persistent disk. ~$7–14/month plus a few cents of AI. |
 | Auth + recovery | Single account, bcrypt, httpOnly cookie, 120-day session. Recovery server-side. |
 | AI abstraction | One `askAI()` interface. The **provider is detected from the key's shape** and the **model is chosen automatically** per request from the provider's live model list — nothing to configure but the key. Context is minimized to open items, projects, locations and today's weather; never the whole database. |
-| Apple Calendar/Reminders | Both directions. Feed **out** (subscribe once, real alerts, prep lead times) and read **in** from **iCloud over CalDAV** — read-only, with recurrence expanded by Apple's server. Reminders deliberately untouched: they work, and duplicating them would only add noise. |
+| Apple Calendar/Reminders | Both directions, and **both her calendar systems**. Feed **out** (subscribe once, real alerts, prep lead times); read **in** from iCloud over CalDAV and from Google via its private `.ics` link — read-only. Reminders deliberately untouched: they work, and duplicating them would only add noise. |
 | Notifications | The calendar feed carries the reliable ones, including preparation lead times. Web push is possible once installed to the home screen. |
 | Weather/location | open-meteo on **fixed coordinates per place**. No permission prompt, no GPS, no battery cost — and her places don't move. |
 | Backup/export | JSON export of everything, any time, plus disk snapshots. |
@@ -96,21 +96,30 @@ computed against the real today rather than the date being viewed, so trip
 departure, lake pack-up, and hosting prep silently failed on any future
 date. All date arithmetic is now relative to the day in question.
 
-## The iCloud calendar link
+## The calendar link — iCloud and Google
 
-Connected from **Settings → Your calendar → Sage** with an Apple ID and an
-app-specific password (about a minute to create at appleid.apple.com; her
-real Apple password never reaches this app, and access is revocable from
-Apple's side at any time without touching Sage).
+She uses **both**, so both are supported, feeding one merged set of events.
+
+- **iCloud** over CalDAV, with an Apple ID and an app-specific password
+  (about a minute to create; her real Apple password never reaches this app,
+  and access is revocable from Apple's side without touching Sage).
+- **Google** — and Outlook, or anything publishing iCalendar — by pasting the
+  calendar's private `.ics` link. No OAuth, no Google Cloud project, no
+  consent screen, and read-only by construction: a feed URL cannot write.
 
 - **Read-only. Not one write request exists in the code.** Apple Calendar
   stays the system of record — §11's "complement, don't replace."
 - **Her appointments drive the trigger engine.** A PT appointment on her
   iCloud calendar suppresses home PT in Sage with no data entry at all.
   Verified: PT rounds gone on the day of an iCloud PT event, back the next.
-- Recurrence is expanded by Apple's own server via CalDAV `<C:expand>`,
-  rather than re-implementing RRULE and getting it subtly wrong.
+- Recurrence: iCloud expands it server-side via CalDAV `<C:expand>`. A
+  subscribed `.ics` feed does not, so `ical.js` expands it here — DAILY,
+  WEEKLY, MONTHLY and YEARLY with INTERVAL, COUNT, UNTIL, BYDAY (including
+  "third Sunday" and "last Friday"), BYMONTHDAY, EXDATE exceptions, and
+  edited single occurrences via RECURRENCE-ID.
 - Per-calendar toggles — she chooses which ones Sage sees.
+- **A failing source never deletes her appointments.** Pruning only runs when
+  every source succeeded, so a dropped connection cannot empty her day.
 - The credential is AES-256-GCM encrypted at rest with a key derived from
   `SESSION_SECRET`, never logged, and stored apart from ordinary records.
   Verified: the stored blob contains no plaintext, decrypts correctly, and
@@ -118,10 +127,17 @@ Apple's side at any time without touching Sage).
   breaking).
 - Events refresh in the background every 30 minutes, never blocking a view.
 
-Parser verified against a realistic payload: timed events keep their local
-time, all-day birthdays stay date-only, folded long lines rejoin, expanded
-recurring instances survive, cancelled events are dropped, and "PT" is
-inferred while "Joe Ward Birthday" is correctly left alone.
+Verified end to end:
+
+| Check | Result |
+|---|---|
+| iCloud PT appointment suppresses home PT | ✅ gone that day, back the next |
+| **Google** PT appointment does the same | ✅ same behaviour, different source |
+| Both sources visible on one day, no collisions | ✅ |
+| A source going down does **not** erase her appointments | ✅ 34 kept through a failed refresh |
+| Recurrence expansion (12 patterns) | ✅ weekly, every-other-week with COUNT, third Sunday, last Friday, yearly all-day birthday, UNTIL, EXDATE, edited occurrence, monthly-31st skipping short months, window clipping |
+| iCalendar parsing | ✅ timed events keep local time, all-day stays date-only, folded lines rejoin, cancellations dropped |
+| "PT" inferred, "Joe Ward Birthday" correctly left alone | ✅ |
 
 ## Not in Sage, on purpose
 

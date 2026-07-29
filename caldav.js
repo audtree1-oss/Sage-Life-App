@@ -231,6 +231,34 @@ async function fetchEvents(calendarUrl, appleId, password, fromISO, toISO) {
   return out;
 }
 
+// A subscribed .ics feed — Google's "secret address in iCal format", Outlook's
+// published link, anything that serves plain iCalendar. Unlike CalDAV nothing
+// expands it server-side, so recurrence is worked out here.
+const { parseCalendar } = require('./ical');
+
+async function fetchFeed(url, fromISO, toISO) {
+  const clean = String(url).trim().replace(/^webcal:/i, 'https:');
+  if (!/^https:\/\//i.test(clean)) throw new Error('That needs to be an https link ending in .ics');
+  let res;
+  try {
+    res = await fetch(clean, { headers: { 'user-agent': 'Sage/1.0', accept: 'text/calendar, text/plain' }, redirect: 'follow' });
+  } catch {
+    // Node's own message here is "fetch failed", which tells her nothing.
+    throw new Error('Could not reach that calendar link. It may have been reset in Google Calendar, or the connection is down.');
+  }
+  if (res.status === 404) throw new Error('That link came back "not found" — check it was copied whole.');
+  if (res.status === 401 || res.status === 403) throw new Error('That link is private. In Google Calendar use the "Secret address in iCal format".');
+  if (!res.ok) throw new Error(`The calendar link returned ${res.status}.`);
+  const text = await res.text();
+  if (!/BEGIN:VCALENDAR/i.test(text)) throw new Error('That link did not return a calendar. Make sure it ends in .ics');
+  return { events: parseCalendar(text, { from: fromISO, to: toISO }), name: calendarName(text) };
+}
+
+function calendarName(text) {
+  const m = /^X-WR-CALNAME:(.*)$/im.exec(String(text).replace(/\r\n[ \t]/g, ''));
+  return m ? m[1].trim().slice(0, 80) : '';
+}
+
 // Her Apple Calendar drives the trigger engine: a PT appointment there
 // suppresses home PT exactly as one entered in Sage would. Only patterns that
 // are unambiguous are inferred — everything else stays a plain appointment.
@@ -242,6 +270,6 @@ function inferEventKind(title) {
 }
 
 module.exports = {
-  encrypt, decrypt, discover, listCalendars, fetchEvents, inferEventKind,
-  _internals: { parseEvents, parseIcalDate, stripNs, unfold },
+  encrypt, decrypt, discover, listCalendars, fetchEvents, fetchFeed, inferEventKind,
+  _internals: { parseEvents, parseIcalDate, stripNs, unfold, calendarName },
 };

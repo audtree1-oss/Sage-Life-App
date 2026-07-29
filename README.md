@@ -61,10 +61,12 @@ data and no business logic.
   a strip on Now with an Undo button. Trust needs a visible undo.
 - **Her calendar, both directions** — Sage's dated items flow *out* to the
   real Apple calendar (real alerts on phone and watch, including preparation
-  lead times), and her iCloud appointments flow *in* over CalDAV, read-only.
-  Sage never writes to her calendar. And her real appointments drive the
-  trigger engine: a PT appointment on iCloud switches off home PT here, with
-  no data entry at all.
+  lead times), and her appointments flow *in* — **iCloud** over CalDAV and
+  **Google** (or Outlook) by pasting a private `.ics` link. Read-only: Sage
+  never writes to her calendars. And her real appointments drive the trigger
+  engine — a PT appointment on either one switches off home PT here, with no
+  data entry at all. Recurring events are expanded properly, including
+  "third Sunday" and "last Friday" patterns.
 - **Export everything** as JSON, any time. Her data is hers.
 
 ## Accessibility

@@ -60,12 +60,16 @@ On the iPhone, in **Safari**:
 Now it has an icon and opens full-screen with no browser bars, like any
 other app. Voice capture works properly this way too.
 
-## 5. Let Sage see your iCloud calendar
+## 5. Let Sage see your calendars
 
 So Today and This Week show your real appointments — and so a PT appointment
 switches off your home PT rounds by itself.
 
-1. On a computer or phone, go to **appleid.apple.com** and sign in.
+**Sage only reads. It never adds, changes or deletes anything.**
+
+### iCloud
+
+1. Go to **appleid.apple.com** and sign in.
 2. **Sign-In and Security** → **App-Specific Passwords** → **+**
 3. Name it **Sage**, and copy the password it gives you (four groups of four
    letters).
@@ -73,11 +77,24 @@ switches off your home PT rounds by itself.
    and paste that password.
 
 Your real Apple password never goes into Sage. The app-specific password is
-stored encrypted, is used only to *read*, and you can cancel it from
-appleid.apple.com any time — Sage loses access immediately and nothing else
-is affected.
+stored encrypted, used only to read, and you can cancel it from
+appleid.apple.com any time.
 
-**Sage never writes to your calendar.** It only looks.
+### Google (and any other calendar)
+
+No Google account setup, no permissions screen — just a link:
+
+1. On a computer, open **Google Calendar**.
+2. Hover the calendar's name on the left → **⋮** → **Settings and sharing**.
+3. Scroll to **Integrate calendar**.
+4. Copy **Secret address in iCal format** (it ends in `.ics`).
+5. In Sage: **More** → **Settings** → **Add a calendar link**, and paste it.
+
+Repeat for each Google calendar you want Sage to see. Keep those links
+private — anyone with one can read that calendar — and you can reset a link
+from the same Google screen at any time.
+
+The same works for Outlook or any calendar that publishes an `.ics` link.
 
 ## 6. Subscribe to the calendar feed
 

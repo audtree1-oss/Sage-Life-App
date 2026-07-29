@@ -251,6 +251,8 @@ CREATE TABLE IF NOT EXISTS cal_calendars (
   name TEXT NOT NULL,
   color TEXT NOT NULL DEFAULT '',
   enabled INTEGER NOT NULL DEFAULT 1,
+  kind TEXT NOT NULL DEFAULT 'caldav',        -- caldav (iCloud) | ics (subscribed link)
+  last_error TEXT NOT NULL DEFAULT '',
   UNIQUE(user_id, url)
 );
 CREATE TABLE IF NOT EXISTS cal_events (
@@ -1308,56 +1310,90 @@ function calCreds(uid) {
   return { acct, password };
 }
 
+// Refreshes everything she's connected — iCloud over CalDAV and any
+// subscribed .ics links (Google, Outlook) — into one set of events. One
+// source failing never stops the others.
 async function syncCalendars(uid, { force = false } = {}) {
-  const creds = calCreds(uid);
-  if (!creds) return { connected: false };
-  if (creds.stale) {
-    db.prepare("UPDATE cal_account SET last_error = ? WHERE user_id = ?")
-      .run('Stored credential could not be read — please reconnect.', uid);
-    return { connected: true, error: 'reconnect' };
-  }
-  const { acct, password } = creds;
-  if (!force && acct.last_sync) {
-    const age = (Date.now() - new Date(acct.last_sync + 'Z').getTime()) / 60000;
+  const acctRow = db.prepare('SELECT * FROM cal_account WHERE user_id = ?').get(uid);
+  const feeds = db.prepare("SELECT * FROM cal_calendars WHERE user_id = ? AND kind = 'ics'").all(uid);
+  if (!acctRow && !feeds.length) return { connected: false };
+
+  const marker = db.prepare("SELECT value FROM preferences WHERE user_id = ? AND key = 'cal_last_sync'").get(uid);
+  if (!force && marker) {
+    const age = (Date.now() - new Date(marker.value).getTime()) / 60000;
     if (age < CAL_SYNC_MINUTES) return { connected: true, skipped: true };
   }
 
-  try {
-    const cals = await caldav.listCalendars(acct.home_url, acct.apple_id, password);
-    const upsert = db.prepare(`INSERT INTO cal_calendars (user_id, url, name, color) VALUES (?, ?, ?, ?)
-      ON CONFLICT(user_id, url) DO UPDATE SET name = excluded.name, color = excluded.color`);
-    for (const c of cals) upsert.run(uid, c.url, c.name, c.color);
+  const from = daysFromNow(-CAL_WINDOW_BACK);
+  const to = daysFromNow(CAL_WINDOW_FORWARD);
+  const seen = new Set();
+  const errors = [];
+  const insEvent = db.prepare(`INSERT INTO cal_events (user_id, calendar_id, uid, title, start, end, all_day, location, event_kind)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(user_id, uid) DO UPDATE SET title = excluded.title, start = excluded.start,
+      end = excluded.end, all_day = excluded.all_day, location = excluded.location,
+      event_kind = excluded.event_kind, calendar_id = excluded.calendar_id`);
+  const store = (calId, events) => {
+    for (const e of events.slice(0, 2000)) {
+      if (!e.start) continue;
+      const uniq = `${calId}::${e.uid}`;
+      seen.add(uniq);
+      insEvent.run(uid, calId, uniq, e.title, e.start, e.end, e.all_day, e.location, caldav.inferEventKind(e.title));
+    }
+  };
 
-    const enabled = db.prepare('SELECT * FROM cal_calendars WHERE user_id = ? AND enabled = 1').all(uid);
-    const from = daysFromNow(-CAL_WINDOW_BACK);
-    const to = daysFromNow(CAL_WINDOW_FORWARD);
-    const seen = new Set();
-    const insEvent = db.prepare(`INSERT INTO cal_events (user_id, calendar_id, uid, title, start, end, all_day, location, event_kind)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(user_id, uid) DO UPDATE SET title = excluded.title, start = excluded.start,
-        end = excluded.end, all_day = excluded.all_day, location = excluded.location,
-        event_kind = excluded.event_kind, calendar_id = excluded.calendar_id`);
-
-    for (const cal of enabled) {
-      const events = await caldav.fetchEvents(cal.url, acct.apple_id, password, from, to);
-      for (const e of events.slice(0, 2000)) {
-        if (!e.start) continue;
-        seen.add(e.uid);
-        insEvent.run(uid, cal.id, e.uid, e.title, e.start, e.end, e.all_day, e.location, caldav.inferEventKind(e.title));
+  // --- iCloud ---
+  if (acctRow) {
+    const creds = calCreds(uid);
+    if (creds && creds.stale) {
+      errors.push('iCloud: stored credential could not be read — please reconnect.');
+      db.prepare('UPDATE cal_account SET last_error = ? WHERE user_id = ?')
+        .run('Stored credential could not be read — please reconnect.', uid);
+    } else if (creds) {
+      const { acct, password } = creds;
+      try {
+        const cals = await caldav.listCalendars(acct.home_url, acct.apple_id, password);
+        const upsert = db.prepare(`INSERT INTO cal_calendars (user_id, url, name, color, kind) VALUES (?, ?, ?, ?, 'caldav')
+          ON CONFLICT(user_id, url) DO UPDATE SET name = excluded.name, color = excluded.color`);
+        for (const c of cals) upsert.run(uid, c.url, c.name, c.color);
+        const enabled = db.prepare("SELECT * FROM cal_calendars WHERE user_id = ? AND enabled = 1 AND kind = 'caldav'").all(uid);
+        for (const cal of enabled) {
+          store(cal.id, await caldav.fetchEvents(cal.url, acct.apple_id, password, from, to));
+        }
+        db.prepare("UPDATE cal_account SET last_sync = datetime('now'), last_error = '' WHERE user_id = ?").run(uid);
+      } catch (e) {
+        errors.push(`iCloud: ${e.message}`);
+        db.prepare('UPDATE cal_account SET last_error = ? WHERE user_id = ?').run(String(e.message).slice(0, 300), uid);
       }
     }
-    // Drop anything that vanished from Apple's side (deleted or moved out of range).
+  }
+
+  // --- subscribed .ics links (Google, Outlook, anything) ---
+  for (const feed of feeds) {
+    if (!feed.enabled) continue;
+    try {
+      const { events, name } = await caldav.fetchFeed(feed.url, from, to);
+      store(feed.id, events);
+      db.prepare("UPDATE cal_calendars SET last_error = '', name = ? WHERE id = ?")
+        .run(feed.name && feed.name !== 'Calendar' ? feed.name : (name || feed.name), feed.id);
+    } catch (e) {
+      errors.push(`${feed.name}: ${e.message}`);
+      db.prepare('UPDATE cal_calendars SET last_error = ? WHERE id = ?').run(String(e.message).slice(0, 300), feed.id);
+    }
+  }
+
+  // Only prune when nothing failed — a source that errored this round has no
+  // events in `seen`, and its appointments must not vanish from her day.
+  if (!errors.length) {
     const stale = db.prepare('SELECT uid FROM cal_events WHERE user_id = ?').all(uid)
       .map((r) => r.uid).filter((u) => !seen.has(u));
     const del = db.prepare('DELETE FROM cal_events WHERE user_id = ? AND uid = ?');
     for (const u of stale) del.run(uid, u);
-
-    db.prepare("UPDATE cal_account SET last_sync = datetime('now'), last_error = '' WHERE user_id = ?").run(uid);
-    return { connected: true, calendars: enabled.length, events: seen.size };
-  } catch (e) {
-    db.prepare('UPDATE cal_account SET last_error = ? WHERE user_id = ?').run(String(e.message).slice(0, 300), uid);
-    return { connected: true, error: String(e.message) };
   }
+
+  db.prepare(`INSERT INTO preferences (user_id, key, value) VALUES (?, 'cal_last_sync', ?)
+    ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value`).run(uid, new Date().toISOString());
+  return { connected: true, events: seen.size, errors };
 }
 
 app.post('/api/calendar/connect', async (req, res) => {
@@ -1382,12 +1418,46 @@ app.post('/api/calendar/connect', async (req, res) => {
 
 app.get('/api/calendar/status', (req, res) => {
   const acct = db.prepare('SELECT apple_id, last_sync, last_error FROM cal_account WHERE user_id = ?').get(req.user.id);
-  if (!acct) return res.json({ connected: false });
+  const cals = db.prepare('SELECT id, name, color, enabled, kind, last_error, url FROM cal_calendars WHERE user_id = ? ORDER BY kind, name').all(req.user.id);
+  const lastSync = db.prepare("SELECT value FROM preferences WHERE user_id = ? AND key = 'cal_last_sync'").get(req.user.id);
   res.json({
-    connected: true, apple_id: acct.apple_id, last_sync: acct.last_sync, last_error: acct.last_error,
-    calendars: db.prepare('SELECT id, name, color, enabled FROM cal_calendars WHERE user_id = ? ORDER BY name').all(req.user.id),
+    icloud: acct ? { connected: true, apple_id: acct.apple_id, last_error: acct.last_error } : { connected: false },
+    calendars: cals.filter((c) => c.kind === 'caldav'),
+    feeds: cals.filter((c) => c.kind === 'ics').map((f) => ({ ...f, url: undefined })),
+    last_sync: lastSync ? lastSync.value : '',
+    connected: !!acct || cals.some((c) => c.kind === 'ics'),
     event_count: db.prepare('SELECT COUNT(*) AS n FROM cal_events WHERE user_id = ?').get(req.user.id).n,
   });
+});
+
+// Subscribe to any .ics link — Google's "Secret address in iCal format",
+// Outlook's published link. No OAuth, no cloud project, and read-only by
+// construction: a feed URL cannot write anything back.
+app.post('/api/calendar/feed', async (req, res) => {
+  const url = String((req.body || {}).url || '').trim();
+  const label = String((req.body || {}).name || '').trim().slice(0, 80);
+  if (!url) return res.status(400).json({ error: 'Paste the calendar link.' });
+  try {
+    const from = daysFromNow(-CAL_WINDOW_BACK);
+    const to = daysFromNow(CAL_WINDOW_FORWARD);
+    const { events, name } = await caldav.fetchFeed(url, from, to);
+    const info = db.prepare(`INSERT INTO cal_calendars (user_id, url, name, kind) VALUES (?, ?, ?, 'ics')
+      ON CONFLICT(user_id, url) DO UPDATE SET name = excluded.name, enabled = 1, last_error = ''`)
+      .run(req.user.id, url, label || name || 'Google calendar');
+    const calId = info.lastInsertRowid
+      || db.prepare('SELECT id FROM cal_calendars WHERE user_id = ? AND url = ?').get(req.user.id, url).id;
+    logHistory(req.user.id, 'calendar', calId, 'subscribed', label || name || url.slice(0, 60));
+    await syncCalendars(req.user.id, { force: true });
+    res.json({ ok: true, name: label || name, events: events.length });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.delete('/api/calendar/feed/:id', (req, res) => {
+  db.prepare("DELETE FROM cal_events WHERE user_id = ? AND calendar_id = ?").run(req.user.id, req.params.id);
+  db.prepare("DELETE FROM cal_calendars WHERE id = ? AND user_id = ? AND kind = 'ics'").run(req.params.id, req.user.id);
+  res.json({ ok: true });
 });
 
 app.post('/api/calendar/sync', async (req, res) => res.json(await syncCalendars(req.user.id, { force: true })));

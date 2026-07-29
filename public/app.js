@@ -574,44 +574,61 @@ VIEWS.settings = async function renderSettings() {
 async function renderICloudBox() {
   const box = $('#icloud-box');
   if (!box) return;
-  const s = await api('/api/calendar/status').catch(() => ({ connected: false }));
-  if (!s.connected) {
-    box.innerHTML = `
-      <div class="card">
-        <p style="margin:0 0 8px;font-size:.88em">Let Sage <b>see</b> your iCloud appointments, so Today and This Week
-        show them — and so a PT appointment on your calendar switches off your home PT rounds by itself.</p>
-        <p class="quiet" style="margin:0 0 10px">Sage only reads. It never adds, changes or deletes anything on your calendar.</p>
-        <button class="btn small" id="ic-connect">Connect iCloud</button>
-      </div>`;
-    $('#ic-connect').onclick = openICloudConnect;
-    return;
-  }
+  const s = await api('/api/calendar/status').catch(() => ({ connected: false, icloud: { connected: false }, calendars: [], feeds: [] }));
   const when = s.last_sync ? fmtDate(s.last_sync.slice(0, 10)) : 'not yet';
-  box.innerHTML = `
+
+  const icloudCard = s.icloud.connected ? `
     <div class="card">
-      <b>${s.last_error ? '⚠️' : '✅'} ${esc(s.apple_id)}</b>
-      <div class="quiet">${s.event_count} appointment${s.event_count === 1 ? '' : 's'} · last checked ${esc(when)}</div>
-      ${s.last_error ? `<div class="quiet" style="color:var(--alert);margin-top:6px">${esc(s.last_error)}</div>` : ''}
-      <div style="margin-top:10px">
+      <b>${s.icloud.last_error ? '⚠️' : '✅'} iCloud — ${esc(s.icloud.apple_id)}</b>
+      ${s.icloud.last_error ? `<div class="quiet" style="color:var(--alert);margin-top:4px">${esc(s.icloud.last_error)}</div>` : ''}
+      <div style="margin-top:8px">
         ${s.calendars.map((c) => `
           <label class="row flat" style="align-items:center;cursor:pointer">
             <input type="checkbox" data-cal="${c.id}" ${c.enabled ? 'checked' : ''} style="transform:scale(1.25)">
             <div class="body"><div class="title" style="font-weight:500">${esc(c.name)}</div></div>
-          </label>`).join('')}
+          </label>`).join('') || '<span class="quiet">No calendars found yet.</span>'}
       </div>
-      <div class="btn-row" style="margin-top:10px">
-        <button class="btn small" id="ic-sync">Check now</button>
-        <button class="btn danger small" id="ic-off">Disconnect</button>
-      </div>
+      <button class="btn danger small" id="ic-off" style="margin-top:8px">Disconnect iCloud</button>
+    </div>` : `
+    <div class="card">
+      <b>🍎 iCloud</b>
+      <p class="quiet" style="margin:4px 0 10px">Connect with an app-specific password — about a minute to set up.</p>
+      <button class="btn small" id="ic-connect">Connect iCloud</button>
     </div>`;
-  $('#ic-sync').onclick = async () => {
+
+  const feedCards = s.feeds.map((f) => `
+    <div class="card">
+      <div style="display:flex;align-items:center;gap:8px">
+        <b style="flex:1">${f.last_error ? '⚠️' : '✅'} ${esc(f.name)}</b>
+        <button class="btn danger small" data-feedoff="${f.id}">Remove</button>
+      </div>
+      ${f.last_error ? `<div class="quiet" style="color:var(--alert);margin-top:4px">${esc(f.last_error)}</div>` : ''}
+    </div>`).join('');
+
+  box.innerHTML = `
+    <p class="quiet" style="margin:-6px 0 10px">Sage only <b>reads</b> your calendars — it never adds, changes or
+    deletes anything. Appointments show up in Today and This Week, and a PT appointment switches off your home PT
+    rounds by itself.</p>
+    ${icloudCard}
+    ${feedCards}
+    <div class="card">
+      <b>📆 Google (or any other calendar)</b>
+      <p class="quiet" style="margin:4px 0 10px">Paste the calendar's private iCal link. No Google account setup needed.</p>
+      <button class="btn small" id="feed-add">Add a calendar link</button>
+    </div>
+    ${s.connected ? `<div class="btn-row"><button class="btn quietbtn small" id="ic-sync">Check for changes now</button></div>
+      <p class="quiet" style="margin-top:8px">${s.event_count} appointment${s.event_count === 1 ? '' : 's'} · last checked ${esc(when)}</p>` : ''}`;
+
+  if ($('#ic-connect')) $('#ic-connect').onclick = openICloudConnect;
+  if ($('#feed-add')) $('#feed-add').onclick = openFeedConnect;
+  if ($('#ic-sync')) $('#ic-sync').onclick = async () => {
     $('#ic-sync').disabled = true;
     $('#ic-sync').textContent = 'Checking…';
     const r = await api('/api/calendar/sync', { method: 'POST' });
-    toast(r.error ? r.error : `Up to date — ${r.events || 0} appointments.`);
+    toast(r.errors && r.errors.length ? r.errors[0] : `Up to date — ${r.events || 0} appointments.`, 5000);
     renderICloudBox();
   };
-  $('#ic-off').onclick = async () => {
+  if ($('#ic-off')) $('#ic-off').onclick = async () => {
     if (!confirm('Disconnect iCloud? Your calendar itself is untouched.')) return;
     await api('/api/calendar/connect', { method: 'DELETE' });
     toast('Disconnected.');
@@ -622,6 +639,49 @@ async function renderICloudBox() {
     if (cb.checked) await api('/api/calendar/sync', { method: 'POST' });
     renderICloudBox();
   });
+  $$('[data-feedoff]', box).forEach((b) => b.onclick = async () => {
+    if (!confirm('Remove this calendar from Sage? The calendar itself is untouched.')) return;
+    await api(`/api/calendar/feed/${b.dataset.feedoff}`, { method: 'DELETE' });
+    toast('Removed.');
+    renderICloudBox();
+  });
+}
+
+function openFeedConnect() {
+  const m = openModal(`
+    <h2>📆 Add a Google calendar</h2>
+    <p class="sub">Google gives each calendar a private link. Paste it here and Sage can read it — nothing else to set up.</p>
+    <div class="card sage" style="font-size:.88em">
+      <b>Finding the link — about a minute</b>
+      <ol style="margin:8px 0 0 -12px;line-height:1.7">
+        <li>On a computer, open <b>Google Calendar</b></li>
+        <li>Hover the calendar's name on the left → <b>⋮</b> → <b>Settings and sharing</b></li>
+        <li>Scroll to <b>Integrate calendar</b></li>
+        <li>Copy <b>Secret address in iCal format</b> (it ends in <b>.ics</b>)</li>
+      </ol>
+      <p class="quiet" style="margin:8px 0 0">Keep that link private — anyone who has it can read that calendar. You can reset it from the same screen at any time.</p>
+    </div>
+    <label class="field">Paste the link</label>
+    <input type="text" id="fd-url" placeholder="https://calendar.google.com/calendar/ical/.../basic.ics">
+    <label class="field">Call it what? (optional)</label>
+    <input type="text" id="fd-name" placeholder="e.g. Google, David's calendar">
+    <div style="margin-top:16px"><button class="btn big" id="fd-go">Add it</button></div>`);
+  $('#fd-go', m).onclick = async () => {
+    const url = $('#fd-url', m).value.trim();
+    if (!url) return toast('Paste the link first.');
+    $('#fd-go', m).disabled = true;
+    $('#fd-go', m).textContent = 'Checking the link…';
+    try {
+      const r = await api('/api/calendar/feed', { method: 'POST', body: { url, name: $('#fd-name', m).value } });
+      closeModal();
+      toast(`Added${r.name ? ` — ${r.name}` : ''}. ${r.events || 0} appointments came across.`, 5000);
+      renderICloudBox();
+    } catch (e) {
+      toast(e.message, 6000);
+      $('#fd-go', m).disabled = false;
+      $('#fd-go', m).textContent = 'Add it';
+    }
+  };
 }
 
 function openICloudConnect() {
