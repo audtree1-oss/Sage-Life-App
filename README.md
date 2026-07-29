@@ -1,1 +1,114 @@
-# Sage-Life-App
+# Sage 🌿
+
+Regena's intelligent, collaborative personal assistant and thinking partner.
+
+Built to the **Sage v1 Independent App Build Specification** (July 29, 2026).
+Say something once, in ordinary language, and stop carrying it.
+
+> "Regena should be able to think out loud once and stop worrying about
+> remembering the thought." — spec §19
+
+**Setting it up? Start with [GETTING-STARTED.md](GETTING-STARTED.md).**
+**Checking it against the spec? See [SPEC-COVERAGE.md](SPEC-COVERAGE.md).**
+
+## The architectural rule
+
+**The database is the source of truth. The AI is the reasoning layer.**
+
+Nothing here depends on a chat history. Structured state lives in SQLite. On
+each interaction the AI receives the *current* state, reasons about it, and
+proposes structured updates that Regena approves. Close the app for a month
+and everything is exactly where she left it.
+
+The AI provider sits behind a single `askAI()` function and is chosen by two
+environment variables — Anthropic and OpenAI both work today, and swapping
+them changes no data and no business logic.
+
+## What's inside
+
+- **Tell Sage** — the big button. Talk or type in ordinary language:
+  *"Good morning Sage. 150.0."* · *"We're going to the lake Friday."* ·
+  *"I paid Terminix."* Sage classifies it against everything already stored,
+  shows what it understood, and saves only what she approves. Obvious,
+  low-risk updates come pre-checked; anything consequential does not.
+- **Now** — immediate items only, aimed at one iPhone screen. Next
+  appointment, today's must-dos, and the routines that are actually relevant
+  right now. Long checklists collapse to a line until tapped.
+- **Today / This Week / Coming Up** — appointments and obligations, then
+  horizons out to a year. Opportunities appear here as opportunities, never
+  as overdue tasks.
+- **Routines with a real trigger engine** — checklists that appear only when
+  they apply: by day, season, weather, location, or event. Home PT
+  disappears on a PT-appointment day. The lake departure list wakes up the
+  day before a trip. Guest bathroom prep surfaces before company. Sump-pump
+  check appears when rain is forecast.
+- **Prerequisites** — hemming the curtains does not surface as actionable
+  while the sewing machine setup is still open. It says so, plainly.
+- **Seasonal windows** — "resurface the windows" waits for September and
+  says *"not until September"* rather than nagging in July.
+- **Opportunities** — useful, never owed. Filter by the time she actually
+  has: 15 minutes, 30, an hour.
+- **Projects** — outcome, next action, what's in the way. Nothing else.
+- **The lake** — trips, departure and arrival checklists, what's stocked up
+  there, and what needs to come home.
+- **Recent captures** — the safety net. Everything she said, what Sage made
+  of it, and a one-tap fix in her own words: *"that isn't urgent, leave it
+  until September."*
+- **Undo for anything Sage did on its own** — auto-applied changes appear in
+  a strip on Now with an Undo button. Trust needs a visible undo.
+- **Phone calendar feed** — subscribe once and Sage's dated items appear on
+  the real Apple/Google calendar, with real alerts on phone and watch,
+  including preparation lead times.
+- **Export everything** as JSON, any time. Her data is hers.
+
+## Accessibility
+
+iPhone-first and large-text by default (not a setting she has to find —
+Large is the default, with Largest available). 48px minimum tap targets,
+short headings, checkboxes, progressive disclosure, and a light/dark
+setting. Voice capture is first-class; typing is never required.
+
+## Privacy boundary (spec §12)
+
+Sage tracks *"update the beneficiary"* without storing the account it refers
+to. No passwords, no financial credentials, no estate documents pulled in
+just because they were mentioned. Only the context needed for the current
+task is sent to the AI provider, and the export/delete path is always open.
+
+## Architecture
+
+Node/Express + SQLite on a persistent disk, deployable to Render via the
+`render.yaml` blueprint.
+
+- **Node 22** pinned in `render.yaml`, `.node-version`, and `package.json`
+- **better-sqlite3** at `$DATA_DIR/sage.sqlite` (WAL mode)
+- **Photos** on the disk at `$DATA_DIR/uploads`, served behind login
+- **Auth** — single-account, bcrypt, httpOnly cookies, 120-day sessions
+- **Weather** — open-meteo by fixed coordinates per place. No API key, no
+  location permission prompt, no battery drain.
+- **Frontend** — one mobile-first vanilla-JS page, no build step
+
+## Run locally
+
+```bash
+npm install
+npm start          # http://localhost:3000, data in ./data
+```
+
+| Variable | Default | What it does |
+|---|---|---|
+| `PORT` | `3000` | HTTP port |
+| `DATA_DIR` | `./data` | SQLite DB + uploads |
+| `AI_PROVIDER` | `anthropic` | `anthropic` or `openai` |
+| `AI_API_KEY` | *(unset)* | Enables the reasoning layer |
+| `AI_MODEL` | per provider | Override the model |
+
+Without `AI_API_KEY` the app still runs: capture falls back to rules, and
+every view, routine, trigger, and checklist works exactly the same. The
+database is the source of truth, so the AI is an enhancement, not a
+dependency.
+
+## Deploy to Render
+
+**New + → Blueprint → pick this repo → Apply.** Walkthrough in
+[GETTING-STARTED.md](GETTING-STARTED.md).

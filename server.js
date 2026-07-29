@@ -1,0 +1,1403 @@
+// Sage — Regena's collaborating personal assistant and thinking partner.
+//
+// THE ARCHITECTURAL RULE (Sage spec §3):
+//   The database is the source of truth. The AI is the reasoning layer.
+// Nothing here depends on an AI conversation history. The AI receives the
+// relevant current state, reasons about it, and proposes structured updates.
+// The provider sits behind askAI() and is swappable by environment variable.
+
+const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
+const express = require('express');
+const Database = require('better-sqlite3');
+const bcrypt = require('bcryptjs');
+const multer = require('multer');
+
+const PORT = process.env.PORT || 3000;
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
+const IS_PROD = process.env.NODE_ENV === 'production' || !!process.env.RENDER;
+const SESSION_SECRET = process.env.SESSION_SECRET || 'sage-local-dev';
+
+// --- AI provider abstraction (spec §3, §17) -------------------------------
+// Paste a key and go. The provider is inferred from the key's shape, and the
+// model is chosen automatically per request — no configuration required.
+const AI_API_KEY = process.env.AI_API_KEY || process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || '';
+
+function detectProvider(key) {
+  if (/^sk-ant-/.test(key)) return 'anthropic';
+  if (/^sk-/.test(key)) return 'openai';
+  return 'anthropic';
+}
+const AI_PROVIDER = (process.env.AI_PROVIDER || detectProvider(AI_API_KEY)).toLowerCase();
+
+// Two tiers. "fast" handles the high-volume structured work (turning a
+// capture into records); "smart" handles the thinking-partner work, where
+// pushing back well matters more than a fraction of a cent.
+const MODEL_PREFERENCES = {
+  openai: {
+    fast: ['gpt-5-mini', 'gpt-4.1-mini', 'gpt-4o-mini', 'gpt-4o'],
+    smart: ['gpt-5', 'gpt-4.1', 'gpt-4o', 'gpt-4o-mini'],
+  },
+  anthropic: {
+    fast: ['claude-haiku-4-5', 'claude-sonnet-5'],
+    smart: ['claude-sonnet-5', 'claude-haiku-4-5'],
+  },
+};
+
+// Ask the provider what it actually offers, then take the best from the
+// preference list. Guessing wrong is harmless — unavailable names are simply
+// skipped — so this keeps working as model names change underneath us.
+let MODELS = null;
+async function resolveModels() {
+  if (MODELS) return MODELS;
+  const prefs = MODEL_PREFERENCES[AI_PROVIDER] || MODEL_PREFERENCES.anthropic;
+  const chosen = { fast: prefs.fast[0], smart: prefs.smart[0], source: 'defaults' };
+  if (AI_PROVIDER === 'openai' && AI_API_KEY) {
+    try {
+      const r = await fetch('https://api.openai.com/v1/models', { headers: { authorization: `Bearer ${AI_API_KEY}` } });
+      if (r.ok) {
+        const available = new Set(((await r.json()).data || []).map((m) => m.id));
+        const pick = (list) => list.find((m) => available.has(m));
+        chosen.fast = pick(prefs.fast) || chosen.fast;
+        chosen.smart = pick(prefs.smart) || chosen.smart;
+        chosen.source = 'live model list';
+      }
+    } catch { /* offline or blocked — defaults are fine */ }
+  }
+  // Explicit overrides always win, for when she wants a specific model.
+  if (process.env.AI_MODEL_FAST) { chosen.fast = process.env.AI_MODEL_FAST; chosen.source = 'env override'; }
+  if (process.env.AI_MODEL_SMART) { chosen.smart = process.env.AI_MODEL_SMART; chosen.source = 'env override'; }
+  if (process.env.AI_MODEL) { chosen.fast = chosen.smart = process.env.AI_MODEL; chosen.source = 'env override'; }
+  MODELS = chosen;
+  console.log(`Sage AI: ${AI_PROVIDER} — fast=${chosen.fast}, smart=${chosen.smart} (${chosen.source})`);
+  return MODELS;
+}
+
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+// ---------------------------------------------------------------------------
+// Database
+// ---------------------------------------------------------------------------
+const db = new Database(path.join(DATA_DIR, 'sage.sqlite'));
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  email TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS sessions (
+  token TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT NOT NULL
+);
+
+-- The universal capture record. Every kind of thing lives here with a type,
+-- so natural capture never has to decide "which form is this?" up front.
+CREATE TABLE IF NOT EXISTS items (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  raw_capture TEXT NOT NULL DEFAULT '',        -- her original words, always kept
+  title TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  type TEXT NOT NULL DEFAULT 'task',           -- task|event|project|opportunity|shopping|note
+  status TEXT NOT NULL DEFAULT 'open',         -- open|done|waiting|someday|dismissed
+  importance TEXT NOT NULL DEFAULT 'should',   -- must|should|opportunity|someday
+  life_area TEXT NOT NULL DEFAULT '',
+  location TEXT NOT NULL DEFAULT '',           -- location key
+  due_at TEXT NOT NULL DEFAULT '',             -- YYYY-MM-DD or YYYY-MM-DDTHH:MM
+  window_start TEXT NOT NULL DEFAULT '',       -- "not before" — seasonal/deferred
+  window_end TEXT NOT NULL DEFAULT '',
+  target_window TEXT NOT NULL DEFAULT '',      -- her words: "September", "cool dry weather"
+  effort_min INTEGER NOT NULL DEFAULT 0,
+  project_id INTEGER NOT NULL DEFAULT 0,
+  prereq_ids TEXT NOT NULL DEFAULT '[]',       -- JSON array of item ids
+  next_action TEXT NOT NULL DEFAULT '',        -- projects
+  outcome TEXT NOT NULL DEFAULT '',            -- projects: what "done" looks like
+  event_start TEXT NOT NULL DEFAULT '',
+  event_end TEXT NOT NULL DEFAULT '',
+  prep_minutes INTEGER NOT NULL DEFAULT 0,     -- leave-by / prepare-by lead time
+  event_kind TEXT NOT NULL DEFAULT '',         -- hosting|pt|appointment|trip|other
+  attendees TEXT NOT NULL DEFAULT '',
+  store TEXT NOT NULL DEFAULT '',              -- shopping
+  purchase_rule TEXT NOT NULL DEFAULT 'now',   -- now|low|on_sale|watch
+  inventory_state TEXT NOT NULL DEFAULT '',    -- ok|low|out
+  photo_file TEXT NOT NULL DEFAULT '',
+  eligibility TEXT NOT NULL DEFAULT '{}',      -- opportunities: JSON rules
+  waiting_on TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'manual',       -- voice|typed|ai|seed
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  done_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_items_user_status ON items(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_items_type ON items(user_id, type);
+
+-- Routines: compact checklists that appear only when relevant (spec §7, §10).
+CREATE TABLE IF NOT EXISTS routines (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  emoji TEXT NOT NULL DEFAULT '',
+  trigger_type TEXT NOT NULL DEFAULT 'daily',  -- daily|weekly|seasonal|weather|location|event|flexible
+  trigger_config TEXT NOT NULL DEFAULT '{}',   -- JSON: days, months, time_of_day, weather, location, event, after_hour, offset_days
+  suppress_if TEXT NOT NULL DEFAULT '{}',      -- JSON: {event_kind:"pt"} — conditional suppression
+  cadence_note TEXT NOT NULL DEFAULT '',
+  sort INTEGER NOT NULL DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS routine_steps (
+  id INTEGER PRIMARY KEY,
+  routine_id INTEGER NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
+  text TEXT NOT NULL,
+  sort INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS routine_done (
+  id INTEGER PRIMARY KEY,
+  routine_id INTEGER NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
+  step_id INTEGER NOT NULL DEFAULT 0,          -- 0 = whole routine marked done
+  date TEXT NOT NULL,
+  done_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(routine_id, step_id, date)
+);
+
+CREATE TABLE IF NOT EXISTS locations (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  key TEXT NOT NULL,
+  name TEXT NOT NULL,
+  emoji TEXT NOT NULL DEFAULT '📍',
+  lat REAL NOT NULL DEFAULT 0,
+  lon REAL NOT NULL DEFAULT 0,
+  is_home INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(user_id, key)
+);
+CREATE TABLE IF NOT EXISTS trips (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  location_key TEXT NOT NULL,
+  start_date TEXT NOT NULL,
+  end_date TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'planned',      -- planned|active|done
+  note TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS inventory (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  location_key TEXT NOT NULL DEFAULT 'evans',
+  state TEXT NOT NULL DEFAULT 'ok',            -- ok|low|out
+  purchase_rule TEXT NOT NULL DEFAULT 'low',   -- now|low|on_sale|watch
+  store TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  photo_file TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+-- Health/tracking lives apart from task data on purpose (spec §5, §12).
+CREATE TABLE IF NOT EXISTS tracking (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL DEFAULT 'weight',
+  value REAL NOT NULL,
+  unit TEXT NOT NULL DEFAULT 'lb',
+  date TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  UNIQUE(kind, date, user_id)
+);
+CREATE TABLE IF NOT EXISTS preferences (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  key TEXT NOT NULL,
+  value TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (user_id, key)
+);
+-- What actually happened, not merely what was planned (spec §5).
+CREATE TABLE IF NOT EXISTS history (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  entity TEXT NOT NULL,
+  entity_id INTEGER NOT NULL DEFAULT 0,
+  action TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  by_ai INTEGER NOT NULL DEFAULT 0,
+  undoable TEXT NOT NULL DEFAULT '',           -- JSON snapshot for one-tap undo
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`);
+
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
+function today() { return new Date().toISOString().slice(0, 10); }
+function daysFromNow(n) { const d = new Date(); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); }
+// Date arithmetic relative to a given day, not to the real today — the views
+// can be asked about any date, and every "is it soon?" test must move with it.
+function daysFrom(date, n) { const d = new Date(date + 'T12:00'); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); }
+function dowOf(date) { return new Date(date + 'T12:00').getDay(); }       // 0=Sun
+function monthOf(date) { return new Date(date + 'T12:00').getMonth() + 1; }
+function safeJSON(s, fallback) { try { return JSON.parse(s || ''); } catch { return fallback; } }
+function logHistory(uid, entity, id, action, detail, byAI = 0, undoable = '') {
+  db.prepare('INSERT INTO history (user_id, entity, entity_id, action, detail, by_ai, undoable) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(uid, entity, id, action, detail, byAI ? 1 : 0, undoable);
+}
+
+// ---------------------------------------------------------------------------
+// App + auth
+// ---------------------------------------------------------------------------
+const app = express();
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
+app.use(express.json({ limit: '2mb' }));
+app.use(express.static(path.join(__dirname, 'public')));
+
+const COOKIE = 'sage_session';
+const SESSION_DAYS = 120;
+
+function parseCookies(req) {
+  const out = {};
+  for (const part of (req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return out;
+}
+function setSessionCookie(res, token) {
+  const parts = [`${COOKIE}=${token}`, 'Path=/', 'HttpOnly', 'SameSite=Lax', `Max-Age=${SESSION_DAYS * 86400}`];
+  if (IS_PROD) parts.push('Secure');
+  res.setHeader('Set-Cookie', parts.join('; '));
+}
+function currentUser(req) {
+  const token = parseCookies(req)[COOKIE];
+  if (!token) return null;
+  return db.prepare(`
+    SELECT u.id, u.name, u.email FROM sessions s JOIN users u ON u.id = s.user_id
+    WHERE s.token = ? AND s.expires_at > datetime('now')`).get(token) || null;
+}
+function requireAuth(req, res, next) {
+  const user = currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Not logged in.' });
+  req.user = user;
+  next();
+}
+
+app.get('/healthz', (req, res) => res.json({ ok: true }));
+
+app.get('/api/me', (req, res) => {
+  const anyUser = db.prepare('SELECT COUNT(*) AS n FROM users').get().n > 0;
+  res.json({ needsSetup: !anyUser, user: currentUser(req), ai: !!AI_API_KEY });
+});
+
+// What the reasoning layer actually resolved to — shown in Settings, so a
+// misconfigured key is visible rather than mysterious.
+app.get('/api/ai/status', async (req, res) => {
+  if (!AI_API_KEY) return res.json({ connected: false });
+  const models = await resolveModels();
+  const probe = await askAI('Reply with the single word: ok', 'ping', { maxTokens: 10 });
+  res.json({ connected: true, provider: AI_PROVIDER, ...models, working: !!probe });
+});
+
+app.post('/api/setup', (req, res) => {
+  if (db.prepare('SELECT COUNT(*) AS n FROM users').get().n > 0) {
+    return res.status(403).json({ error: 'Already set up — just sign in.' });
+  }
+  const { name, email, password } = req.body || {};
+  if (!name || !email || !password || password.length < 8) {
+    return res.status(400).json({ error: 'Need a name, an email, and a password of at least 8 characters.' });
+  }
+  const info = db.prepare('INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)')
+    .run(name.trim(), email.trim().toLowerCase(), bcrypt.hashSync(password, 12));
+  const token = crypto.randomBytes(32).toString('hex');
+  db.prepare(`INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, datetime('now', '+${SESSION_DAYS} days'))`)
+    .run(token, info.lastInsertRowid);
+  setSessionCookie(res, token);
+  seedForUser(info.lastInsertRowid);
+  res.json({ ok: true });
+});
+
+app.post('/api/login', (req, res) => {
+  const { email, password } = req.body || {};
+  const user = db.prepare('SELECT * FROM users WHERE email = ?').get((email || '').trim().toLowerCase());
+  if (!user || !bcrypt.compareSync(password || '', user.password_hash)) {
+    return res.status(401).json({ error: 'That combination did not work. Try again.' });
+  }
+  const token = crypto.randomBytes(32).toString('hex');
+  db.prepare(`INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, datetime('now', '+${SESSION_DAYS} days'))`)
+    .run(token, user.id);
+  setSessionCookie(res, token);
+  res.json({ ok: true });
+});
+
+app.post('/api/logout', (req, res) => {
+  const token = parseCookies(req)[COOKIE];
+  if (token) db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+  res.setHeader('Set-Cookie', `${COOKIE}=; Path=/; HttpOnly; Max-Age=0`);
+  res.json({ ok: true });
+});
+
+app.use('/api', requireAuth);
+app.use('/photos', requireAuth);
+
+// ---------------------------------------------------------------------------
+// AI layer — one function, provider swappable (spec §3, §13)
+// ---------------------------------------------------------------------------
+const SAGE_PERSONA = `You are Sage, Regena's intelligent collaborating personal assistant and thinking partner.
+
+How you behave:
+- Regena is the boss of her own decisions. You help her manage; you do not manage her. Never command, scold, parent, patronize, or get bossy.
+- You are not timid and not a yes-man. Challenge assumptions and rationalization when it is useful; avoid groupthink. Facts over reflexive agreement.
+- Useful phrasings: "Do you think you're rationalizing here?" · "Is that worth your attention this week?" · "How important is it to do that now, or can it be left alone a bit longer?" · "I see three reasonable choices. My recommendation is ___, and here's why."
+- Restraint: sometimes you stop at the question. Do not append an obvious recommendation just to demonstrate intelligence.
+- THE DECISION PRINCIPLE: could improve ≠ needs improvement. Possibility does not automatically become obligation. Preserve ideas as opportunities or someday rather than manufacturing work.
+- About a possible purchase, the useful question is "what would this add that the current ones don't?" — and intentional duplication by location is valid, not failure.
+- A deferred task is not automatically avoidance. Weather, location, prerequisites, practicality and true priority all count.
+- Never bury a required action inside prose. Actions come first, in a compact list; explanation only if it adds value.
+- The database is authoritative for status. Never invent a completion or rely on recollection.
+- Distinguish must-do, should-do, opportunity, waiting, and someday. No fake overdue status, no streaks, no guilt.
+- Honor prerequisites — do not surface something whose prerequisite is unfinished.
+- When uncertain about changing stored data, ask one short clarifying question instead of guessing.
+- Tone: warm, intelligent, natural, occasionally funny. Never patronizing. The relationship matters, not only the information — a generic task-manager voice is not Sage.
+- Her goal is lower cognitive load and fewer forgotten commitments, not maximum productivity, and not a smaller life.`;
+
+async function askAI(system, user, { maxTokens = 1200, json = false, tier = 'fast' } = {}) {
+  if (!AI_API_KEY) return null;
+  const models = await resolveModels();
+  const model = models[tier] || models.fast;
+  try {
+    let url, headers, body;
+    if (AI_PROVIDER === 'openai') {
+      url = 'https://api.openai.com/v1/chat/completions';
+      headers = { 'authorization': `Bearer ${AI_API_KEY}`, 'content-type': 'application/json' };
+      body = {
+        model, max_completion_tokens: maxTokens,
+        messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+        ...(json ? { response_format: { type: 'json_object' } } : {}),
+      };
+    } else {
+      url = 'https://api.anthropic.com/v1/messages';
+      headers = { 'x-api-key': AI_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' };
+      body = { model, max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }] };
+    }
+    const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+    if (!r.ok) {
+      // A rejected model name is the one failure worth reporting loudly —
+      // everything still works, it just gets literal, and that looks like a bug.
+      if (r.status === 400 || r.status === 404) console.error(`Sage AI: "${model}" was rejected (${r.status}). Set AI_MODEL_FAST / AI_MODEL_SMART to override.`);
+      return null;
+    }
+    const data = await r.json();
+    const text = AI_PROVIDER === 'openai'
+      ? (data.choices?.[0]?.message?.content || '')
+      : (data.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('');
+    return text.trim().replace(/^```(json)?\s*/i, '').replace(/```\s*$/, '');
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Weather (open-meteo — free, no key, fixed coordinates per location)
+// ---------------------------------------------------------------------------
+const weatherCache = new Map();
+async function getWeather(lat, lon) {
+  if (!lat && !lon) return null;
+  const key = `${lat.toFixed(2)},${lon.toFixed(2)}`;
+  const hit = weatherCache.get(key);
+  if (hit && Date.now() - hit.at < 30 * 60 * 1000) return hit.data;
+  try {
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}`
+      + `&current=temperature_2m,precipitation,weather_code`
+      + `&daily=precipitation_sum,precipitation_probability_max,temperature_2m_max,temperature_2m_min,weather_code`
+      + `&temperature_unit=fahrenheit&timezone=auto&forecast_days=3`;
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    const d = await r.json();
+    const data = {
+      tempNow: Math.round(d.current?.temperature_2m ?? 0),
+      rainingNow: (d.current?.precipitation ?? 0) > 0,
+      code: d.current?.weather_code ?? 0,
+      todayRain: (d.daily?.precipitation_sum?.[0] ?? 0) > 0.02 || (d.daily?.precipitation_probability_max?.[0] ?? 0) >= 60,
+      todayHigh: Math.round(d.daily?.temperature_2m_max?.[0] ?? 0),
+      todayLow: Math.round(d.daily?.temperature_2m_min?.[0] ?? 0),
+      dryNextDays: (d.daily?.precipitation_sum || []).every((v) => (v ?? 0) < 0.02),
+    };
+    weatherCache.set(key, { at: Date.now(), data });
+    return data;
+  } catch { return null; }
+}
+
+// ---------------------------------------------------------------------------
+// THE TRIGGER ENGINE — what is relevant right now, and what is suppressed
+// ---------------------------------------------------------------------------
+async function buildContext(uid, date = today()) {
+  const locs = db.prepare('SELECT * FROM locations WHERE user_id = ?').all(uid);
+  const trips = db.prepare(`SELECT * FROM trips WHERE user_id = ? AND status != 'done' ORDER BY start_date`).all(uid);
+  const activeTrip = trips.find((t) => t.start_date <= date && (!t.end_date || t.end_date >= date)) || null;
+  const upcomingTrip = trips.find((t) => t.start_date > date) || null;
+
+  // Where is she today? Active trip wins; otherwise home.
+  const hereKey = activeTrip ? activeTrip.location_key : (locs.find((l) => l.is_home)?.key || 'evans');
+  const here = locs.find((l) => l.key === hereKey) || locs[0] || null;
+  const weather = here ? await getWeather(here.lat, here.lon) : null;
+
+  const events = db.prepare(`
+    SELECT * FROM items WHERE user_id = ? AND type = 'event' AND status = 'open'
+      AND substr(COALESCE(NULLIF(event_start,''), due_at), 1, 10) = ?
+    ORDER BY event_start`).all(uid, date);
+  const eventKinds = new Set(events.map((e) => e.event_kind).filter(Boolean));
+
+  // Hosting: day-of is best for freshness, the day before is acceptable —
+  // so guest prep surfaces on both.
+  const soonEvents = db.prepare(`
+    SELECT * FROM items WHERE user_id = ? AND type = 'event' AND status = 'open'
+      AND substr(COALESCE(NULLIF(event_start,''), due_at), 1, 10) BETWEEN ? AND ?`).all(uid, date, daysFrom(date, 1));
+  const hostingSoon = soonEvents.some((e) => e.event_kind === 'hosting');
+
+  return {
+    date, dow: dowOf(date), month: monthOf(date),
+    hour: new Date().getHours(),
+    locations: locs, here, hereKey,
+    activeTrip, upcomingTrip,
+    weather, events, eventKinds, hostingSoon,
+    tripDeparture: upcomingTrip && upcomingTrip.start_date <= daysFrom(date, 1) ? upcomingTrip : null,
+    tripEnding: activeTrip && activeTrip.end_date && activeTrip.end_date <= daysFrom(date, 1) ? activeTrip : null,
+  };
+}
+
+// Is this routine relevant, given today's context?
+function routineActive(r, ctx) {
+  const cfg = safeJSON(r.trigger_config, {});
+  const sup = safeJSON(r.suppress_if, {});
+  // Conditional suppression, e.g. no home PT rounds on a PT appointment day.
+  if (sup.event_kind && ctx.eventKinds.has(sup.event_kind)) return false;
+  if (sup.on_trip && ctx.activeTrip) return false;
+
+  if (cfg.months && cfg.months.length && !cfg.months.includes(ctx.month)) return false;
+  if (cfg.location && cfg.location !== ctx.hereKey) return false;
+
+  switch (r.trigger_type) {
+    case 'daily':
+      return true;
+    case 'weekly':
+      return !cfg.days || !cfg.days.length || cfg.days.includes(ctx.dow);
+    case 'seasonal':
+      return true; // months filter above already decided it
+    case 'weather':
+      if (!ctx.weather) return false;
+      if (cfg.weather === 'rain') return ctx.weather.todayRain || ctx.weather.rainingNow;
+      if (cfg.weather === 'dry') return ctx.weather.dryNextDays;
+      if (cfg.weather === 'hot') return ctx.weather.todayHigh >= (cfg.above || 90);
+      if (cfg.weather === 'cold') return ctx.weather.todayLow <= (cfg.below || 40);
+      return false;
+    case 'location':
+      return cfg.location ? cfg.location === ctx.hereKey : true;
+    case 'event':
+      if (cfg.event === 'hosting') return ctx.hostingSoon;
+      if (cfg.event === 'trip_departure') return !!ctx.tripDeparture;
+      if (cfg.event === 'trip_arrival') return !!ctx.activeTrip && ctx.activeTrip.start_date === ctx.date;
+      // Packing up: the last day of a trip, and the day before it.
+      if (cfg.event === 'trip_return') return !!ctx.tripEnding;
+      return ctx.eventKinds.has(cfg.event);
+    case 'flexible':
+      return true; // shown in its own gentle section, never "overdue"
+    default:
+      return false;
+  }
+}
+
+function routineWithSteps(r, date) {
+  const steps = db.prepare('SELECT * FROM routine_steps WHERE routine_id = ? ORDER BY sort, id').all(r.id);
+  const done = new Set(db.prepare('SELECT step_id FROM routine_done WHERE routine_id = ? AND date = ?').all(r.id, date).map((d) => d.step_id));
+  const cfg = safeJSON(r.trigger_config, {});
+  return {
+    ...r, config: cfg,
+    steps: steps.map((s) => ({ ...s, done: done.has(s.id) })),
+    remaining: steps.filter((s) => !done.has(s.id)).length,
+    complete: steps.length > 0 && steps.every((s) => done.has(s.id)),
+    time_of_day: cfg.time_of_day || 'any',
+    after_hour: cfg.after_hour || 0,
+  };
+}
+
+async function activeRoutines(uid, date = today(), ctx = null) {
+  ctx = ctx || await buildContext(uid, date);
+  const all = db.prepare('SELECT * FROM routines WHERE user_id = ? AND active = 1 ORDER BY sort, id').all(uid);
+  return all.filter((r) => routineActive(r, ctx)).map((r) => routineWithSteps(r, date));
+}
+
+// Is this item actually actionable right now? (prerequisites + windows, spec §9)
+function itemBlockers(item, byId) {
+  const reasons = [];
+  for (const pid of safeJSON(item.prereq_ids, [])) {
+    const p = byId.get(Number(pid));
+    if (p && p.status !== 'done') reasons.push(`waiting on: ${p.title}`);
+  }
+  if (item.window_start && item.window_start > today()) {
+    reasons.push(item.target_window ? `not until ${item.target_window}` : `not until ${item.window_start}`);
+  }
+  return reasons;
+}
+
+function eligibleOpportunity(item, ctx) {
+  const e = safeJSON(item.eligibility, {});
+  if (e.days && e.days.length && !e.days.includes(ctx.dow)) return false;
+  if (e.months && e.months.length && !e.months.includes(ctx.month)) return false;
+  if (e.location && e.location !== ctx.hereKey) return false;
+  if (e.weather === 'dry' && ctx.weather && !ctx.weather.dryNextDays) return false;
+  if (e.weather === 'not_rain' && ctx.weather && ctx.weather.todayRain) return false;
+  if (e.max_temp && ctx.weather && ctx.weather.todayHigh > e.max_temp) return false;
+  if (e.min_temp && ctx.weather && ctx.weather.todayLow < e.min_temp) return false;
+  return true;
+}
+
+function scoreItem(i) {
+  const t = today();
+  let s = 0;
+  if (i.due_at && i.due_at.slice(0, 10) < t) s += 60;
+  else if (i.due_at && i.due_at.slice(0, 10) === t) s += 45;
+  else if (i.due_at && i.due_at.slice(0, 10) <= daysFromNow(2)) s += 25;
+  if (i.importance === 'must') s += 30;
+  if (i.importance === 'should') s += 10;
+  if (i.importance === 'opportunity') s -= 10;
+  if (i.importance === 'someday') s -= 40;
+  if (i.type === 'event') s += 20;
+  return s;
+}
+
+// ---------------------------------------------------------------------------
+// Items API
+// ---------------------------------------------------------------------------
+const ITEM_TYPES = ['task', 'event', 'project', 'opportunity', 'shopping', 'note'];
+const ITEM_STATUSES = ['open', 'done', 'waiting', 'someday', 'dismissed'];
+const IMPORTANCES = ['must', 'should', 'opportunity', 'someday'];
+
+const ITEM_FIELDS = ['raw_capture', 'title', 'note', 'type', 'status', 'importance', 'life_area', 'location',
+  'due_at', 'window_start', 'window_end', 'target_window', 'effort_min', 'project_id', 'prereq_ids',
+  'next_action', 'outcome', 'event_start', 'event_end', 'prep_minutes', 'event_kind', 'attendees',
+  'store', 'purchase_rule', 'inventory_state', 'photo_file', 'eligibility', 'waiting_on', 'source'];
+
+function cleanItem(b, existing) {
+  const out = {};
+  for (const f of ITEM_FIELDS) {
+    if (b[f] === undefined || b[f] === null) continue;
+    if (f === 'prereq_ids' || f === 'eligibility') out[f] = typeof b[f] === 'string' ? b[f] : JSON.stringify(b[f]);
+    else if (f === 'effort_min' || f === 'project_id' || f === 'prep_minutes') out[f] = parseInt(b[f], 10) || 0;
+    else out[f] = String(b[f]).trim();
+  }
+  if (out.type && !ITEM_TYPES.includes(out.type)) out.type = 'task';
+  if (out.status && !ITEM_STATUSES.includes(out.status)) out.status = 'open';
+  if (out.importance && !IMPORTANCES.includes(out.importance)) out.importance = 'should';
+  if (!existing && !out.title) out.title = (out.raw_capture || 'Untitled').slice(0, 80);
+  return out;
+}
+
+app.get('/api/items', (req, res) => {
+  const { type, status, q, project_id, location } = req.query;
+  let sql = 'SELECT * FROM items WHERE user_id = ?';
+  const args = [req.user.id];
+  if (type) { sql += ' AND type = ?'; args.push(type); }
+  if (status) { sql += ' AND status = ?'; args.push(status); }
+  if (project_id) { sql += ' AND project_id = ?'; args.push(project_id); }
+  if (location) { sql += ' AND location = ?'; args.push(location); }
+  if (q) { sql += ' AND (title LIKE ? OR note LIKE ? OR raw_capture LIKE ?)'; const l = `%${q}%`; args.push(l, l, l); }
+  sql += ' ORDER BY updated_at DESC LIMIT 500';
+  res.json(db.prepare(sql).all(...args));
+});
+
+app.post('/api/items', (req, res) => {
+  const it = cleanItem(req.body || {});
+  const cols = Object.keys(it);
+  const info = db.prepare(`INSERT INTO items (user_id, ${cols.join(', ')}) VALUES (?, ${cols.map(() => '?').join(', ')})`)
+    .run(req.user.id, ...cols.map((c) => it[c]));
+  logHistory(req.user.id, 'item', info.lastInsertRowid, 'created', it.title || '');
+  res.json(db.prepare('SELECT * FROM items WHERE id = ?').get(info.lastInsertRowid));
+});
+
+app.patch('/api/items/:id', (req, res) => {
+  const existing = db.prepare('SELECT * FROM items WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
+  if (!existing) return res.status(404).json({ error: 'No such item.' });
+  const it = cleanItem(req.body || {}, existing);
+  if (it.status === 'done' && existing.status !== 'done') it.done_at = new Date().toISOString();
+  if (it.status && it.status !== 'done') it.done_at = '';
+  const cols = Object.keys(it);
+  if (cols.length) {
+    db.prepare(`UPDATE items SET ${cols.map((c) => `${c} = ?`).join(', ')}, updated_at = datetime('now') WHERE id = ?`)
+      .run(...cols.map((c) => it[c]), existing.id);
+    logHistory(req.user.id, 'item', existing.id, it.status === 'done' ? 'completed' : 'updated', it.title || existing.title,
+      0, JSON.stringify({ status: existing.status, done_at: existing.done_at }));
+  }
+  res.json(db.prepare('SELECT * FROM items WHERE id = ?').get(existing.id));
+});
+
+app.delete('/api/items/:id', (req, res) => {
+  const it = db.prepare('SELECT * FROM items WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
+  if (!it) return res.status(404).json({ error: 'Already gone.' });
+  if (it.photo_file) { try { fs.unlinkSync(path.join(UPLOAD_DIR, it.photo_file)); } catch {} }
+  db.prepare('DELETE FROM items WHERE id = ?').run(it.id);
+  logHistory(req.user.id, 'item', it.id, 'deleted', it.title);
+  res.json({ ok: true });
+});
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: UPLOAD_DIR,
+    filename: (req, file, cb) => cb(null, crypto.randomBytes(16).toString('hex') + path.extname(file.originalname).slice(0, 10).replace(/[^.\w]/g, '')),
+  }),
+  limits: { fileSize: 15 * 1024 * 1024 },
+});
+
+app.post('/api/items/:id/photo', upload.single('file'), (req, res) => {
+  const it = db.prepare('SELECT * FROM items WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
+  if (!it || !req.file) return res.status(404).json({ error: 'No such item.' });
+  db.prepare('UPDATE items SET photo_file = ? WHERE id = ?').run(req.file.filename, it.id);
+  res.json(db.prepare('SELECT * FROM items WHERE id = ?').get(it.id));
+});
+
+app.get('/photos/:file', (req, res) => {
+  const f = String(req.params.file).replace(/[^\w.]/g, '');
+  const p = path.join(UPLOAD_DIR, f);
+  if (!fs.existsSync(p)) return res.status(404).send('Not found');
+  res.sendFile(p);
+});
+
+// ---------------------------------------------------------------------------
+// Routines API
+// ---------------------------------------------------------------------------
+app.get('/api/routines', async (req, res) => {
+  const date = req.query.date || today();
+  if (req.query.all === '1') {
+    const rows = db.prepare('SELECT * FROM routines WHERE user_id = ? ORDER BY sort, id').all(req.user.id);
+    return res.json(rows.map((r) => routineWithSteps(r, date)));
+  }
+  res.json(await activeRoutines(req.user.id, date));
+});
+
+app.post('/api/routines', (req, res) => {
+  const b = req.body || {};
+  const info = db.prepare(`INSERT INTO routines (user_id, name, emoji, trigger_type, trigger_config, suppress_if, cadence_note, sort)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    req.user.id, String(b.name || 'Routine'), String(b.emoji || '📋'),
+    String(b.trigger_type || 'daily'),
+    typeof b.trigger_config === 'string' ? b.trigger_config : JSON.stringify(b.trigger_config || {}),
+    typeof b.suppress_if === 'string' ? b.suppress_if : JSON.stringify(b.suppress_if || {}),
+    String(b.cadence_note || ''), parseInt(b.sort, 10) || 0);
+  const rid = info.lastInsertRowid;
+  const ins = db.prepare('INSERT INTO routine_steps (routine_id, text, sort) VALUES (?, ?, ?)');
+  (b.steps || []).forEach((s, i) => ins.run(rid, String(typeof s === 'string' ? s : s.text), i));
+  res.json(routineWithSteps(db.prepare('SELECT * FROM routines WHERE id = ?').get(rid), today()));
+});
+
+app.patch('/api/routines/:id', (req, res) => {
+  const r = db.prepare('SELECT * FROM routines WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
+  if (!r) return res.status(404).json({ error: 'No such routine.' });
+  const b = req.body || {};
+  db.prepare(`UPDATE routines SET name = ?, emoji = ?, trigger_type = ?, trigger_config = ?, suppress_if = ?, cadence_note = ?, active = ? WHERE id = ?`)
+    .run(String(b.name ?? r.name), String(b.emoji ?? r.emoji), String(b.trigger_type ?? r.trigger_type),
+      b.trigger_config === undefined ? r.trigger_config : (typeof b.trigger_config === 'string' ? b.trigger_config : JSON.stringify(b.trigger_config)),
+      b.suppress_if === undefined ? r.suppress_if : (typeof b.suppress_if === 'string' ? b.suppress_if : JSON.stringify(b.suppress_if)),
+      String(b.cadence_note ?? r.cadence_note), b.active === undefined ? r.active : (b.active ? 1 : 0), r.id);
+  if (Array.isArray(b.steps)) {
+    db.prepare('DELETE FROM routine_steps WHERE routine_id = ?').run(r.id);
+    const ins = db.prepare('INSERT INTO routine_steps (routine_id, text, sort) VALUES (?, ?, ?)');
+    b.steps.forEach((s, i) => ins.run(r.id, String(typeof s === 'string' ? s : s.text), i));
+  }
+  res.json(routineWithSteps(db.prepare('SELECT * FROM routines WHERE id = ?').get(r.id), today()));
+});
+
+app.delete('/api/routines/:id', (req, res) => {
+  db.prepare('DELETE FROM routines WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
+  res.json({ ok: true });
+});
+
+app.post('/api/routines/:id/step/:stepId', (req, res) => {
+  const r = db.prepare('SELECT * FROM routines WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
+  if (!r) return res.status(404).json({ error: 'No such routine.' });
+  const date = String((req.body || {}).date || today());
+  const stepId = parseInt(req.params.stepId, 10) || 0;
+  const on = (req.body || {}).done !== false;
+  if (on) db.prepare('INSERT OR IGNORE INTO routine_done (routine_id, step_id, date) VALUES (?, ?, ?)').run(r.id, stepId, date);
+  else db.prepare('DELETE FROM routine_done WHERE routine_id = ? AND step_id = ? AND date = ?').run(r.id, stepId, date);
+  res.json(routineWithSteps(r, date));
+});
+
+// ---------------------------------------------------------------------------
+// Locations, trips, inventory, tracking, preferences
+// ---------------------------------------------------------------------------
+app.get('/api/locations', (req, res) => res.json(db.prepare('SELECT * FROM locations WHERE user_id = ?').all(req.user.id)));
+
+app.post('/api/locations', (req, res) => {
+  const b = req.body || {};
+  db.prepare(`INSERT INTO locations (user_id, key, name, emoji, lat, lon, is_home) VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(user_id, key) DO UPDATE SET name = excluded.name, emoji = excluded.emoji, lat = excluded.lat, lon = excluded.lon, is_home = excluded.is_home`)
+    .run(req.user.id, String(b.key || 'place'), String(b.name || 'Place'), String(b.emoji || '📍'),
+      parseFloat(b.lat) || 0, parseFloat(b.lon) || 0, b.is_home ? 1 : 0);
+  res.json(db.prepare('SELECT * FROM locations WHERE user_id = ? AND key = ?').get(req.user.id, String(b.key || 'place')));
+});
+
+app.get('/api/trips', (req, res) => res.json(db.prepare(`SELECT * FROM trips WHERE user_id = ? ORDER BY start_date DESC LIMIT 50`).all(req.user.id)));
+
+app.post('/api/trips', (req, res) => {
+  const b = req.body || {};
+  const info = db.prepare('INSERT INTO trips (user_id, location_key, start_date, end_date, note) VALUES (?, ?, ?, ?, ?)')
+    .run(req.user.id, String(b.location_key || 'lake'), String(b.start_date || today()), String(b.end_date || ''), String(b.note || ''));
+  logHistory(req.user.id, 'trip', info.lastInsertRowid, 'planned', `${b.location_key} ${b.start_date}`);
+  res.json(db.prepare('SELECT * FROM trips WHERE id = ?').get(info.lastInsertRowid));
+});
+
+app.patch('/api/trips/:id', (req, res) => {
+  const t = db.prepare('SELECT * FROM trips WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
+  if (!t) return res.status(404).json({ error: 'No such trip.' });
+  const b = req.body || {};
+  db.prepare('UPDATE trips SET location_key = ?, start_date = ?, end_date = ?, status = ?, note = ? WHERE id = ?')
+    .run(String(b.location_key ?? t.location_key), String(b.start_date ?? t.start_date), String(b.end_date ?? t.end_date),
+      String(b.status ?? t.status), String(b.note ?? t.note), t.id);
+  res.json(db.prepare('SELECT * FROM trips WHERE id = ?').get(t.id));
+});
+
+app.delete('/api/trips/:id', (req, res) => {
+  db.prepare('DELETE FROM trips WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
+  res.json({ ok: true });
+});
+
+app.get('/api/inventory', (req, res) => {
+  let sql = 'SELECT * FROM inventory WHERE user_id = ?';
+  const args = [req.user.id];
+  if (req.query.location) { sql += ' AND location_key = ?'; args.push(req.query.location); }
+  sql += " ORDER BY CASE state WHEN 'out' THEN 0 WHEN 'low' THEN 1 ELSE 2 END, name";
+  res.json(db.prepare(sql).all(...args));
+});
+
+app.post('/api/inventory', (req, res) => {
+  const b = req.body || {};
+  const info = db.prepare('INSERT INTO inventory (user_id, name, location_key, state, purchase_rule, store, note) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(req.user.id, String(b.name || ''), String(b.location_key || 'evans'), String(b.state || 'ok'),
+      String(b.purchase_rule || 'low'), String(b.store || ''), String(b.note || ''));
+  res.json(db.prepare('SELECT * FROM inventory WHERE id = ?').get(info.lastInsertRowid));
+});
+
+app.patch('/api/inventory/:id', (req, res) => {
+  const inv = db.prepare('SELECT * FROM inventory WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
+  if (!inv) return res.status(404).json({ error: 'Not found.' });
+  const b = req.body || {};
+  db.prepare(`UPDATE inventory SET name = ?, location_key = ?, state = ?, purchase_rule = ?, store = ?, note = ?, updated_at = datetime('now') WHERE id = ?`)
+    .run(String(b.name ?? inv.name), String(b.location_key ?? inv.location_key), String(b.state ?? inv.state),
+      String(b.purchase_rule ?? inv.purchase_rule), String(b.store ?? inv.store), String(b.note ?? inv.note), inv.id);
+  res.json(db.prepare('SELECT * FROM inventory WHERE id = ?').get(inv.id));
+});
+
+app.delete('/api/inventory/:id', (req, res) => {
+  db.prepare('DELETE FROM inventory WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
+  res.json({ ok: true });
+});
+
+app.get('/api/tracking', (req, res) => {
+  const kind = req.query.kind || 'weight';
+  res.json(db.prepare('SELECT * FROM tracking WHERE user_id = ? AND kind = ? ORDER BY date DESC LIMIT 400').all(req.user.id, kind));
+});
+
+app.post('/api/tracking', (req, res) => {
+  const b = req.body || {};
+  const value = parseFloat(b.value);
+  if (!isFinite(value)) return res.status(400).json({ error: 'Need a number.' });
+  db.prepare(`INSERT INTO tracking (user_id, kind, value, unit, date, note) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(kind, date, user_id) DO UPDATE SET value = excluded.value, note = excluded.note`)
+    .run(req.user.id, String(b.kind || 'weight'), value, String(b.unit || 'lb'), String(b.date || today()), String(b.note || ''));
+  res.json({ ok: true });
+});
+
+app.get('/api/preferences', (req, res) => {
+  const rows = db.prepare('SELECT key, value FROM preferences WHERE user_id = ?').all(req.user.id);
+  res.json(Object.fromEntries(rows.map((r) => [r.key, r.value])));
+});
+
+app.post('/api/preferences', (req, res) => {
+  const ins = db.prepare(`INSERT INTO preferences (user_id, key, value) VALUES (?, ?, ?)
+    ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value`);
+  for (const [k, v] of Object.entries(req.body || {})) ins.run(req.user.id, String(k), String(v));
+  res.json({ ok: true });
+});
+
+app.get('/api/history', (req, res) => {
+  res.json(db.prepare('SELECT * FROM history WHERE user_id = ? ORDER BY id DESC LIMIT 60').all(req.user.id));
+});
+
+// One-tap undo for anything Sage did on its own (trust needs a visible undo).
+app.post('/api/history/:id/undo', (req, res) => {
+  const h = db.prepare('SELECT * FROM history WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
+  if (!h || !h.undoable) return res.status(400).json({ error: 'Nothing to undo there.' });
+  const snap = safeJSON(h.undoable, null);
+  if (!snap) return res.status(400).json({ error: 'Nothing to undo there.' });
+  if (h.entity === 'item') {
+    db.prepare(`UPDATE items SET status = ?, done_at = ?, updated_at = datetime('now') WHERE id = ? AND user_id = ?`)
+      .run(snap.status || 'open', snap.done_at || '', h.entity_id, req.user.id);
+  }
+  db.prepare("UPDATE history SET undoable = '', detail = detail || ' (undone)' WHERE id = ?").run(h.id);
+  logHistory(req.user.id, h.entity, h.entity_id, 'undone', h.detail);
+  res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// VIEWS (spec §7) — generated from database state, never from chat history
+// ---------------------------------------------------------------------------
+function openItems(uid) {
+  return db.prepare("SELECT * FROM items WHERE user_id = ? AND status IN ('open','waiting')").all(uid);
+}
+
+function partitionItems(uid, ctx) {
+  const all = openItems(uid);
+  const byId = new Map(all.map((i) => [i.id, i]));
+  const t = ctx.date;
+  const enrich = (i) => ({ ...i, blockers: itemBlockers(i, byId) });
+  const live = all.map(enrich);
+  const actionable = live.filter((i) => !i.blockers.length && i.type !== 'event' && i.type !== 'project' && i.importance !== 'opportunity' && i.status !== 'waiting');
+  return {
+    all: live, byId,
+    events: live.filter((i) => i.type === 'event' && (i.event_start || i.due_at).slice(0, 10) === t)
+      .sort((a, b) => (a.event_start || '').localeCompare(b.event_start || '')),
+    overdue: actionable.filter((i) => i.due_at && i.due_at.slice(0, 10) < t),
+    dueToday: actionable.filter((i) => i.due_at && i.due_at.slice(0, 10) === t),
+    dueSoon: actionable.filter((i) => i.due_at && i.due_at.slice(0, 10) > t && i.due_at.slice(0, 10) <= daysFromNow(7)),
+    noDate: actionable.filter((i) => !i.due_at),
+    blocked: live.filter((i) => i.blockers.length),
+    waiting: live.filter((i) => i.status === 'waiting'),
+    projects: live.filter((i) => i.type === 'project'),
+    shopping: live.filter((i) => i.type === 'shopping'),
+    opportunities: live.filter((i) => i.importance === 'opportunity' || i.type === 'opportunity'),
+  };
+}
+
+// NOW / Morning — immediate items only, aimed at one iPhone screen (spec §8).
+app.get('/api/views/now', async (req, res) => {
+  const uid = req.user.id;
+  const date = req.query.date || today();
+  const ctx = await buildContext(uid, date);
+  const p = partitionItems(uid, ctx);
+  const routines = await activeRoutines(uid, date, ctx);
+  const hour = new Date().getHours();
+
+  const timely = routines.filter((r) => {
+    if (r.complete) return false;
+    if (r.after_hour && hour < r.after_hour) return false;
+    if (r.time_of_day === 'morning' && hour >= 12) return false;
+    if (r.time_of_day === 'evening' && hour < 16) return false;
+    return true;
+  });
+
+  const nextEvent = p.events.find((e) => !e.event_start || e.event_start.slice(11) >= new Date().toTimeString().slice(0, 5)) || p.events[0] || null;
+  const immediate = [...p.overdue, ...p.dueToday].sort((a, b) => scoreItem(b) - scoreItem(a)).slice(0, 6);
+  const weightToday = db.prepare("SELECT * FROM tracking WHERE user_id = ? AND kind = 'weight' AND date = ?").get(uid, date) || null;
+
+  res.json({
+    date, greeting: hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening',
+    here: ctx.here, weather: ctx.weather,
+    activeTrip: ctx.activeTrip, upcomingTrip: ctx.upcomingTrip,
+    events: p.events, nextEvent,
+    immediate, routines: timely,
+    weightToday,
+    counts: { open: p.all.length, overdue: p.overdue.length, blocked: p.blocked.length },
+  });
+});
+
+app.get('/api/views/today', async (req, res) => {
+  const uid = req.user.id;
+  const date = req.query.date || today();
+  const ctx = await buildContext(uid, date);
+  const p = partitionItems(uid, ctx);
+  const routines = await activeRoutines(uid, date, ctx);
+  res.json({
+    date, here: ctx.here, weather: ctx.weather,
+    events: p.events,
+    must: [...p.overdue, ...p.dueToday].filter((i) => i.importance === 'must').sort((a, b) => scoreItem(b) - scoreItem(a)),
+    should: [...p.overdue, ...p.dueToday].filter((i) => i.importance !== 'must').sort((a, b) => scoreItem(b) - scoreItem(a)),
+    anytime: p.noDate.filter((i) => i.importance !== 'someday').sort((a, b) => scoreItem(b) - scoreItem(a)).slice(0, 12),
+    routines,
+    waiting: p.waiting,
+    blocked: p.blocked,
+  });
+});
+
+app.get('/api/views/week', async (req, res) => {
+  const uid = req.user.id;
+  const ctx = await buildContext(uid);
+  const p = partitionItems(uid, ctx);
+  const end = daysFromNow(7);
+  const days = [];
+  for (let d = 0; d < 7; d++) {
+    const date = daysFromNow(d);
+    days.push({
+      date,
+      events: p.all.filter((i) => i.type === 'event' && (i.event_start || i.due_at).slice(0, 10) === date),
+      items: p.all.filter((i) => i.type !== 'event' && i.due_at && i.due_at.slice(0, 10) === date && !i.blockers.length),
+    });
+  }
+  res.json({
+    days,
+    overdue: p.overdue,
+    opportunities: p.opportunities.filter((i) => eligibleOpportunity(i, ctx)).slice(0, 6),
+    trips: db.prepare(`SELECT * FROM trips WHERE user_id = ? AND status != 'done' AND start_date <= ? ORDER BY start_date`).all(uid, end),
+  });
+});
+
+app.get('/api/views/coming-up', async (req, res) => {
+  const uid = req.user.id;
+  const ctx = await buildContext(uid);
+  const p = partitionItems(uid, ctx);
+  const inRange = (from, to) => p.all
+    .filter((i) => {
+      const d = (i.due_at || i.window_start || '').slice(0, 10);
+      return d && d > from && d <= to;
+    })
+    .sort((a, b) => (a.due_at || a.window_start).localeCompare(b.due_at || b.window_start));
+  res.json({
+    month: inRange(daysFromNow(7), daysFromNow(31)),
+    quarter: inRange(daysFromNow(31), daysFromNow(92)),
+    halfYear: inRange(daysFromNow(92), daysFromNow(183)),
+    year: inRange(daysFromNow(183), daysFromNow(366)),
+    seasonal: p.all.filter((i) => i.target_window && (!i.due_at)).sort((a, b) => (a.window_start || '').localeCompare(b.window_start || '')),
+  });
+});
+
+app.get('/api/views/opportunities', async (req, res) => {
+  const uid = req.user.id;
+  const ctx = await buildContext(uid);
+  const p = partitionItems(uid, ctx);
+  const maxEffort = parseInt(req.query.minutes, 10) || 0;
+  const eligible = p.opportunities
+    .filter((i) => !i.blockers.length && eligibleOpportunity(i, ctx))
+    .filter((i) => !maxEffort || !i.effort_min || i.effort_min <= maxEffort);
+  res.json({
+    here: ctx.here, weather: ctx.weather,
+    eligible,
+    notYet: p.opportunities.filter((i) => i.blockers.length || !eligibleOpportunity(i, ctx)),
+  });
+});
+
+app.get('/api/views/projects', async (req, res) => {
+  const uid = req.user.id;
+  const ctx = await buildContext(uid);
+  const p = partitionItems(uid, ctx);
+  res.json({
+    projects: p.projects.map((pr) => {
+      const children = p.all.filter((i) => i.project_id === pr.id);
+      const open = children.filter((c) => c.status !== 'done');
+      const nextUp = open.filter((c) => !c.blockers.length).sort((a, b) => scoreItem(b) - scoreItem(a))[0] || null;
+      return {
+        ...pr,
+        next: pr.next_action || nextUp?.title || '',
+        nextItem: nextUp,
+        blockedCount: open.filter((c) => c.blockers.length).length,
+        openCount: open.length,
+      };
+    }),
+  });
+});
+
+app.get('/api/views/lake', async (req, res) => {
+  const uid = req.user.id;
+  const ctx = await buildContext(uid);
+  const trips = db.prepare(`SELECT * FROM trips WHERE user_id = ? AND status != 'done' ORDER BY start_date`).all(uid);
+  const next = trips[0] || null;
+  const allRoutines = db.prepare('SELECT * FROM routines WHERE user_id = ? AND active = 1 ORDER BY sort, id').all(uid);
+  const tripRoutines = allRoutines.filter((r) => {
+    const cfg = safeJSON(r.trigger_config, {});
+    return cfg.event === 'trip_departure' || cfg.event === 'trip_arrival' || cfg.location === 'lake';
+  }).map((r) => routineWithSteps(r, ctx.date));
+  res.json({
+    trips, next,
+    routines: tripRoutines,
+    packing: db.prepare("SELECT * FROM items WHERE user_id = ? AND status = 'open' AND (location = 'lake' OR life_area = 'lake') ORDER BY type, title").all(uid),
+    inventory: db.prepare("SELECT * FROM inventory WHERE user_id = ? AND location_key = 'lake' ORDER BY CASE state WHEN 'out' THEN 0 WHEN 'low' THEN 1 ELSE 2 END, name").all(uid),
+    weather: next ? await (async () => {
+      const loc = ctx.locations.find((l) => l.key === (next.location_key || 'lake'));
+      return loc ? getWeather(loc.lat, loc.lon) : null;
+    })() : null,
+  });
+});
+
+app.get('/api/views/inbox', (req, res) => {
+  const uid = req.user.id;
+  res.json({
+    recent: db.prepare('SELECT * FROM items WHERE user_id = ? ORDER BY id DESC LIMIT 30').all(uid),
+    history: db.prepare('SELECT * FROM history WHERE user_id = ? ORDER BY id DESC LIMIT 30').all(uid),
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CAPTURE — say it once, in ordinary language (spec §1, §6)
+// ---------------------------------------------------------------------------
+// Which model tier a capture deserves. One thought is routine work; a bedtime
+// brain dump with several threads in it is where a weaker model splits things
+// wrong. Counts real sentences only — "Good morning Sage. 150.0." is one
+// thought, not two, and it happens every morning.
+function captureTier(text) {
+  const sentences = text.split(/[.;!?\n]+/).map((s) => s.trim()).filter((s) => s.split(/\s+/).length >= 3);
+  return (text.length > 180 || sentences.length > 1) ? 'smart' : 'fast';
+}
+
+function heuristicCapture(text, ctx) {
+  const proposals = [];
+  const weight = text.match(/\b(\d{2,3}\.\d)\b/);
+  if (weight && /^(good morning|morning|hi|hey|sage)/i.test(text.trim())) {
+    proposals.push({ kind: 'tracking', kindOf: 'weight', value: parseFloat(weight[1]), date: ctx.date });
+  }
+  const lower = text.toLowerCase();
+  const trip = lower.match(/\b(?:going|go|heading|head|leaving|leave)\s+(?:to\s+)?the\s+lake\s+(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)/);
+  if (trip) proposals.push({ kind: 'trip', location_key: 'lake', when: trip[1] });
+  const paid = lower.match(/\bi\s+(?:paid|finished|did|completed|called)\s+(.{2,50})/);
+  if (paid) proposals.push({ kind: 'complete', match: paid[1].replace(/[.!]$/, '').trim() });
+  if (!proposals.length) {
+    proposals.push({
+      kind: 'item',
+      item: { title: text.slice(0, 90), raw_capture: text, type: 'task', importance: 'should', status: 'open' },
+    });
+  }
+  return proposals;
+}
+
+function contextForAI(uid, ctx) {
+  const open = openItems(uid);
+  const byId = new Map(open.map((i) => [i.id, i]));
+  const brief = open.slice(0, 120).map((i) => ({
+    id: i.id, title: i.title, type: i.type, status: i.status, importance: i.importance,
+    due_at: i.due_at || undefined, target_window: i.target_window || undefined,
+    blocked_by: itemBlockers(i, byId).length ? itemBlockers(i, byId) : undefined,
+    project_id: i.project_id || undefined,
+  }));
+  const projects = open.filter((i) => i.type === 'project').map((p) => ({ id: p.id, title: p.title, next_action: p.next_action }));
+  const locs = db.prepare('SELECT key, name FROM locations WHERE user_id = ?').all(uid);
+  // Her stable operating context travels with every request — it is what keeps
+  // Sage sounding like Sage rather than a task manager (spec §2, §24).
+  const prefs = Object.fromEntries(
+    db.prepare('SELECT key, value FROM preferences WHERE user_id = ?').all(uid).map((r) => [r.key, r.value]));
+  return { today: ctx.date, dayOfWeek: new Date(ctx.date + 'T12:00').toLocaleDateString('en-US', { weekday: 'long' }),
+    here: ctx.hereKey, locations: locs, weather: ctx.weather || undefined,
+    activeTrip: ctx.activeTrip || undefined, upcomingTrip: ctx.upcomingTrip || undefined,
+    aboutHer: prefs, openItems: brief, projects };
+}
+
+app.post('/api/capture', async (req, res) => {
+  const uid = req.user.id;
+  const text = String((req.body || {}).text || '').slice(0, 4000);
+  if (!text.trim()) return res.status(400).json({ error: 'Nothing captured yet.' });
+  const ctx = await buildContext(uid);
+  let proposals = null;
+  let source = 'heuristic';
+  let reply = '';
+
+  const ai = await askAI(
+    SAGE_PERSONA + `
+
+You convert one natural capture into structured proposals against Regena's existing data.
+Reply ONLY with JSON: {"reply": string, "proposals": [ ... ]}
+"reply" is one short sentence confirming what you understood, or ONE clarifying question if genuinely ambiguous. No preamble, no pleasantries.
+
+Each proposal is one of:
+{"kind":"item","confidence":"high"|"low","item":{"title","type":"task|event|project|opportunity|shopping|note","importance":"must|should|opportunity|someday","due_at":"YYYY-MM-DD or YYYY-MM-DDTHH:MM or ''","target_window":"her words e.g. September","window_start":"YYYY-MM-DD or ''","location":"location key or ''","life_area":"","effort_min":0,"project_id":0,"prereq_ids":[],"event_start":"","event_kind":"hosting|pt|appointment|trip|other or ''","prep_minutes":0,"store":"","purchase_rule":"now|low|on_sale|watch","note":""}}
+{"kind":"complete","confidence":"high"|"low","item_id":123,"why":"short"}
+{"kind":"update","confidence":"high"|"low","item_id":123,"changes":{...same item fields...},"why":"short"}
+{"kind":"tracking","kindOf":"weight","value":150.0,"date":"YYYY-MM-DD"}
+{"kind":"trip","location_key":"lake","start_date":"YYYY-MM-DD","end_date":""}
+
+Rules:
+- Match against openItems by meaning before creating anything new. "I paid Terminix" is a completion of an existing item, not a new one.
+- confidence "high" only for obvious, low-risk changes; anything consequential or ambiguous is "low".
+- A greeting containing a bare number like "150.0" is a weight entry.
+- Resolve relative dates ("Friday", "tomorrow") to real dates.
+- Something not to be done until a season goes in target_window + window_start, not due_at.
+- If a task depends on another open item, set prereq_ids.`,
+    `Her capture: "${text}"\n\nCurrent state:\n${JSON.stringify(contextForAI(uid, ctx))}`,
+    { maxTokens: 1600, json: true, tier: captureTier(text) },
+  );
+
+  if (ai) {
+    const parsed = safeJSON(ai, null);
+    if (parsed && Array.isArray(parsed.proposals)) {
+      proposals = parsed.proposals;
+      reply = String(parsed.reply || '');
+      source = 'ai';
+    }
+  }
+  if (!proposals) proposals = heuristicCapture(text, ctx);
+
+  // Attach the human-readable target of each completion/update for the confirm screen.
+  for (const p of proposals) {
+    if ((p.kind === 'complete' || p.kind === 'update') && p.item_id) {
+      const target = db.prepare('SELECT id, title, status FROM items WHERE id = ? AND user_id = ?').get(p.item_id, uid);
+      p.target = target || null;
+      if (!target) p.kind = 'invalid';
+    }
+  }
+  res.json({ raw: text, reply, proposals: proposals.filter((p) => p.kind !== 'invalid'), source });
+});
+
+// Apply the proposals Regena approved (or the auto-applicable ones).
+app.post('/api/capture/apply', (req, res) => {
+  const uid = req.user.id;
+  const b = req.body || {};
+  const raw = String(b.raw || '');
+  const proposals = Array.isArray(b.proposals) ? b.proposals : [];
+  const applied = [];
+
+  for (const p of proposals) {
+    if (p.kind === 'item' && p.item) {
+      const it = cleanItem({ ...p.item, raw_capture: raw, source: b.source === 'voice' ? 'voice' : 'typed' });
+      const cols = Object.keys(it);
+      const info = db.prepare(`INSERT INTO items (user_id, ${cols.join(', ')}) VALUES (?, ${cols.map(() => '?').join(', ')})`)
+        .run(uid, ...cols.map((c) => it[c]));
+      logHistory(uid, 'item', info.lastInsertRowid, 'captured', it.title, 1);
+      applied.push({ kind: 'item', id: info.lastInsertRowid, title: it.title });
+    } else if (p.kind === 'complete' && p.item_id) {
+      const cur = db.prepare('SELECT * FROM items WHERE id = ? AND user_id = ?').get(p.item_id, uid);
+      if (!cur) continue;
+      db.prepare(`UPDATE items SET status = 'done', done_at = ?, updated_at = datetime('now') WHERE id = ?`)
+        .run(new Date().toISOString(), cur.id);
+      logHistory(uid, 'item', cur.id, 'completed', cur.title, 1, JSON.stringify({ status: cur.status, done_at: cur.done_at }));
+      applied.push({ kind: 'complete', id: cur.id, title: cur.title });
+    } else if (p.kind === 'update' && p.item_id && p.changes) {
+      const cur = db.prepare('SELECT * FROM items WHERE id = ? AND user_id = ?').get(p.item_id, uid);
+      if (!cur) continue;
+      const it = cleanItem(p.changes, cur);
+      const cols = Object.keys(it);
+      if (cols.length) {
+        db.prepare(`UPDATE items SET ${cols.map((c) => `${c} = ?`).join(', ')}, updated_at = datetime('now') WHERE id = ?`)
+          .run(...cols.map((c) => it[c]), cur.id);
+        logHistory(uid, 'item', cur.id, 'updated', cur.title, 1, JSON.stringify({ status: cur.status, done_at: cur.done_at }));
+      }
+      applied.push({ kind: 'update', id: cur.id, title: cur.title });
+    } else if (p.kind === 'tracking') {
+      db.prepare(`INSERT INTO tracking (user_id, kind, value, unit, date) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(kind, date, user_id) DO UPDATE SET value = excluded.value`)
+        .run(uid, String(p.kindOf || 'weight'), parseFloat(p.value) || 0, 'lb', String(p.date || today()));
+      applied.push({ kind: 'tracking', value: p.value });
+    } else if (p.kind === 'trip') {
+      const info = db.prepare('INSERT INTO trips (user_id, location_key, start_date, end_date) VALUES (?, ?, ?, ?)')
+        .run(uid, String(p.location_key || 'lake'), String(p.start_date || p.when || today()), String(p.end_date || ''));
+      logHistory(uid, 'trip', info.lastInsertRowid, 'planned', `${p.location_key || 'lake'} ${p.start_date || ''}`, 1);
+      applied.push({ kind: 'trip', id: info.lastInsertRowid });
+    }
+  }
+  res.json({ applied });
+});
+
+// Natural-language correction: "that isn't urgent, leave it until September"
+app.post('/api/correct', async (req, res) => {
+  const uid = req.user.id;
+  const itemId = parseInt((req.body || {}).item_id, 10);
+  const text = String((req.body || {}).text || '').slice(0, 500);
+  const item = db.prepare('SELECT * FROM items WHERE id = ? AND user_id = ?').get(itemId, uid);
+  if (!item || !text.trim()) return res.status(400).json({ error: 'Need an item and a correction.' });
+  const ctx = await buildContext(uid);
+  const ai = await askAI(
+    SAGE_PERSONA + `\n\nRegena is correcting how one stored item is classified. Reply ONLY with JSON: {"changes":{...},"reply":"one short sentence"}. Allowed change fields: title, type, status, importance, due_at, window_start, target_window, location, life_area, effort_min, purchase_rule, note. Today is ${ctx.date}. "Not until September" means window_start on the 1st of the next September and target_window "September" — not a due date.`,
+    `Item: ${JSON.stringify({ id: item.id, title: item.title, type: item.type, importance: item.importance, due_at: item.due_at, target_window: item.target_window, location: item.location })}\nHer correction: "${text}"`,
+    { maxTokens: 500, json: true },
+  );
+  const parsed = safeJSON(ai || '', null);
+  if (!parsed || !parsed.changes) return res.status(422).json({ error: 'Could not read that correction — you can edit the fields directly.' });
+  const it = cleanItem(parsed.changes, item);
+  const cols = Object.keys(it);
+  if (cols.length) {
+    db.prepare(`UPDATE items SET ${cols.map((c) => `${c} = ?`).join(', ')}, updated_at = datetime('now') WHERE id = ?`)
+      .run(...cols.map((c) => it[c]), item.id);
+    logHistory(uid, 'item', item.id, 'corrected', text, 1, JSON.stringify({ status: item.status, done_at: item.done_at }));
+  }
+  res.json({ item: db.prepare('SELECT * FROM items WHERE id = ?').get(item.id), reply: parsed.reply || 'Updated.' });
+});
+
+// Ask Sage something about her own state — reasoning over the database.
+app.post('/api/ask', async (req, res) => {
+  const uid = req.user.id;
+  const question = String((req.body || {}).text || '').slice(0, 1000);
+  if (!question.trim()) return res.status(400).json({ error: 'Ask me something.' });
+  const ctx = await buildContext(uid);
+  const routines = await activeRoutines(uid, ctx.date, ctx);
+  const answer = await askAI(
+    SAGE_PERSONA + '\n\nAnswer from the state given. Be brief. Lead with actions if any. If the state does not contain the answer, say so plainly rather than guessing.',
+    `Question: "${question}"\n\nState:\n${JSON.stringify({ ...contextForAI(uid, ctx), routinesToday: routines.map((r) => ({ name: r.name, remaining: r.remaining })) })}`,
+    // The thinking-partner path always gets the better model. This is where
+    // "do you think you're rationalizing here?" either lands or doesn't.
+    { maxTokens: 700, tier: 'smart' },
+  );
+  res.json({ answer: answer || 'The AI layer is not configured, so I can only show you what is stored — try the Today view.' });
+});
+
+// ---------------------------------------------------------------------------
+// Calendar feed out — real Apple/Google reminders, no integration needed
+// ---------------------------------------------------------------------------
+function calendarToken(u) {
+  return crypto.createHmac('sha256', SESSION_SECRET).update(`cal:${u.id}:${u.password_hash}`).digest('hex').slice(0, 32);
+}
+app.get('/api/calendar-url', (req, res) => {
+  const u = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  res.json({ path: `/calendar/${calendarToken(u)}.ics` });
+});
+const icsEsc = (t) => String(t || '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+
+app.get('/calendar/:token.ics', (req, res) => {
+  const user = db.prepare('SELECT * FROM users').all().find((u) => calendarToken(u) === req.params.token);
+  if (!user) return res.status(404).send('Not found');
+  const items = db.prepare("SELECT * FROM items WHERE user_id = ? AND status = 'open' AND (due_at != '' OR event_start != '')").all(user.id);
+  const trips = db.prepare(`SELECT * FROM trips WHERE user_id = ? AND status != 'done'`).all(user.id);
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
+  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Sage//EN', 'CALSCALE:GREGORIAN',
+    'X-WR-CALNAME:Sage', 'X-WR-CALDESC:From Sage'];
+  const push = (uid, when, summary, desc, leadMin) => {
+    const isDateTime = when.length > 10;
+    lines.push('BEGIN:VEVENT', `UID:${uid}@sage`, `DTSTAMP:${stamp}`);
+    if (isDateTime) lines.push(`DTSTART:${when.replace(/[-:]/g, '').slice(0, 15)}00`);
+    else lines.push(`DTSTART;VALUE=DATE:${when.replace(/-/g, '')}`);
+    lines.push(`SUMMARY:${icsEsc(summary)}`, `DESCRIPTION:${icsEsc(desc)}`,
+      'BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${icsEsc(summary)}`,
+      `TRIGGER:${leadMin ? `-PT${leadMin}M` : (isDateTime ? '-PT30M' : 'PT8H')}`, 'END:VALARM', 'END:VEVENT');
+  };
+  for (const i of items) {
+    const when = i.event_start || i.due_at;
+    if (!when) continue;
+    const icon = i.type === 'event' ? '📅' : '•';
+    push(`item-${i.id}`, when, `${icon} ${i.title}`, i.note || 'From Sage', i.prep_minutes || 0);
+  }
+  for (const t of trips) {
+    push(`trip-${t.id}`, t.start_date, `🚗 Leave for ${t.location_key}`, t.note || 'Departure checklist is in Sage', 0);
+  }
+  lines.push('END:VCALENDAR');
+  res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
+  res.send(lines.join('\r\n'));
+});
+
+// ---------------------------------------------------------------------------
+// Export / import (her data is hers — spec §12)
+// ---------------------------------------------------------------------------
+app.get('/api/export.json', (req, res) => {
+  const uid = req.user.id;
+  res.setHeader('Content-Disposition', `attachment; filename="sage-export-${today()}.json"`);
+  res.json({
+    exported_at: new Date().toISOString(),
+    items: db.prepare('SELECT * FROM items WHERE user_id = ?').all(uid),
+    routines: db.prepare('SELECT * FROM routines WHERE user_id = ?').all(uid).map((r) => ({
+      ...r, steps: db.prepare('SELECT text, sort FROM routine_steps WHERE routine_id = ? ORDER BY sort').all(r.id),
+    })),
+    routine_done: db.prepare('SELECT rd.* FROM routine_done rd JOIN routines r ON r.id = rd.routine_id WHERE r.user_id = ?').all(uid),
+    locations: db.prepare('SELECT * FROM locations WHERE user_id = ?').all(uid),
+    trips: db.prepare('SELECT * FROM trips WHERE user_id = ?').all(uid),
+    inventory: db.prepare('SELECT * FROM inventory WHERE user_id = ?').all(uid),
+    tracking: db.prepare('SELECT * FROM tracking WHERE user_id = ?').all(uid),
+    preferences: db.prepare('SELECT key, value FROM preferences WHERE user_id = ?').all(uid),
+    history: db.prepare('SELECT * FROM history WHERE user_id = ?').all(uid),
+  });
+});
+
+// Bulk seed import — the Sage Master material, timestamps preserved (spec §16).
+app.post('/api/import/seed', (req, res) => {
+  const uid = req.user.id;
+  const b = req.body || {};
+  let n = { items: 0, routines: 0, inventory: 0 };
+  const insItem = db.prepare(`INSERT INTO items (user_id, raw_capture, title, note, type, status, importance, life_area, location,
+    due_at, window_start, target_window, effort_min, next_action, outcome, event_start, event_kind, store, purchase_rule, eligibility, source, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'seed', COALESCE(?, datetime('now')), COALESCE(?, datetime('now')))`);
+  for (const i of (b.items || [])) {
+    insItem.run(uid, String(i.raw_capture || ''), String(i.title || 'Untitled'), String(i.note || ''),
+      ITEM_TYPES.includes(i.type) ? i.type : 'task', ITEM_STATUSES.includes(i.status) ? i.status : 'open',
+      IMPORTANCES.includes(i.importance) ? i.importance : 'should', String(i.life_area || ''), String(i.location || ''),
+      String(i.due_at || ''), String(i.window_start || ''), String(i.target_window || ''), parseInt(i.effort_min, 10) || 0,
+      String(i.next_action || ''), String(i.outcome || ''), String(i.event_start || ''), String(i.event_kind || ''),
+      String(i.store || ''), String(i.purchase_rule || 'now'),
+      typeof i.eligibility === 'string' ? i.eligibility : JSON.stringify(i.eligibility || {}),
+      i.created_at || null, i.updated_at || null);
+    n.items++;
+  }
+  for (const r of (b.routines || [])) {
+    const info = db.prepare(`INSERT INTO routines (user_id, name, emoji, trigger_type, trigger_config, suppress_if, cadence_note, sort)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(uid, String(r.name || 'Routine'), String(r.emoji || '📋'),
+      String(r.trigger_type || 'daily'),
+      typeof r.trigger_config === 'string' ? r.trigger_config : JSON.stringify(r.trigger_config || {}),
+      typeof r.suppress_if === 'string' ? r.suppress_if : JSON.stringify(r.suppress_if || {}),
+      String(r.cadence_note || ''), parseInt(r.sort, 10) || 0);
+    const ins = db.prepare('INSERT INTO routine_steps (routine_id, text, sort) VALUES (?, ?, ?)');
+    (r.steps || []).forEach((s, i) => ins.run(info.lastInsertRowid, String(typeof s === 'string' ? s : s.text), i));
+    n.routines++;
+  }
+  for (const v of (b.inventory || [])) {
+    db.prepare('INSERT INTO inventory (user_id, name, location_key, state, purchase_rule, store, note) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(uid, String(v.name || ''), String(v.location_key || 'evans'), String(v.state || 'ok'),
+        String(v.purchase_rule || 'low'), String(v.store || ''), String(v.note || ''));
+    n.inventory++;
+  }
+  logHistory(uid, 'seed', 0, 'imported', JSON.stringify(n));
+  res.json({ ok: true, imported: n });
+});
+
+// ---------------------------------------------------------------------------
+// Seed content — everything Sage's spec §10 already specified, ready on day one
+// ---------------------------------------------------------------------------
+function seedForUser(uid) {
+  const S = require('./seed-data');
+
+  const insLoc = db.prepare('INSERT OR IGNORE INTO locations (user_id, key, name, emoji, lat, lon, is_home) VALUES (?, ?, ?, ?, ?, ?, ?)');
+  for (const l of S.LOCATIONS) insLoc.run(uid, l.key, l.name, l.emoji, l.lat, l.lon, l.is_home);
+
+  const insRoutine = db.prepare(`INSERT INTO routines (user_id, name, emoji, trigger_type, trigger_config, suppress_if, cadence_note, sort)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+  const insStep = db.prepare('INSERT INTO routine_steps (routine_id, text, sort) VALUES (?, ?, ?)');
+  for (const r of S.ROUTINES) {
+    const info = insRoutine.run(uid, r.name, r.emoji, r.trigger_type,
+      JSON.stringify(r.trigger_config || {}), JSON.stringify(r.suppress_if || {}), r.cadence_note || '', r.sort);
+    r.steps.forEach((s, i) => insStep.run(info.lastInsertRowid, s, i));
+  }
+
+  const insItem = db.prepare(`INSERT INTO items (user_id, title, note, type, status, importance, life_area, location,
+    due_at, window_start, target_window, effort_min, event_start, event_kind, store, purchase_rule, next_action, outcome, eligibility, source)
+    VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'seed')`);
+  const put = (i) => insItem.run(uid, i.title, i.note || '', i.type || 'task', i.importance || 'should',
+    i.life_area || '', i.location || '', i.due_at || '', i.window_start || '', i.target_window || '',
+    i.effort_min || 0, i.event_start || '', i.event_kind || '', i.store || '', i.purchase_rule || 'now',
+    i.next_action || '', i.outcome || '', JSON.stringify(i.eligibility || {})).lastInsertRowid;
+
+  for (const e of S.EVENTS) put({ ...e, type: 'event' });
+
+  // Two passes: insert everything, then resolve prerequisite and project links
+  // by the string keys the seed file uses, since real ids only exist after insert.
+  const idByKey = new Map();
+  for (const i of S.ITEMS) {
+    const id = put(i);
+    if (i.key) idByKey.set(i.key, id);
+    i._id = id;
+  }
+  for (const i of S.ITEMS) {
+    const prereqs = (i.prereq_keys || []).map((k) => idByKey.get(k)).filter(Boolean);
+    const projectId = i.project_key ? idByKey.get(i.project_key) : 0;
+    if (prereqs.length || projectId) {
+      db.prepare('UPDATE items SET prereq_ids = ?, project_id = ? WHERE id = ?')
+        .run(JSON.stringify(prereqs), projectId || 0, i._id);
+    }
+    delete i._id;
+  }
+
+  const insTrip = db.prepare('INSERT INTO trips (user_id, location_key, start_date, end_date, note) VALUES (?, ?, ?, ?, ?)');
+  for (const t of S.TRIPS) insTrip.run(uid, t.location_key, t.start_date, t.end_date || '', t.note || '');
+
+  const insInv = db.prepare('INSERT INTO inventory (user_id, name, location_key, state, purchase_rule, store, note) VALUES (?, ?, ?, ?, ?, ?, ?)');
+  for (const v of S.INVENTORY) insInv.run(uid, v.name, v.location_key, v.state, v.purchase_rule, v.store || '', v.note || '');
+
+  const insPref = db.prepare('INSERT OR REPLACE INTO preferences (user_id, key, value) VALUES (?, ?, ?)');
+  for (const [k, v] of Object.entries(S.PREFERENCES)) insPref.run(uid, k, String(v));
+
+  logHistory(uid, 'seed', 0, 'created',
+    `Day-one context: ${S.ROUTINES.length} routines, ${S.ITEMS.length + S.EVENTS.length} items, ${S.INVENTORY.length} supplies`);
+}
+
+// ---------------------------------------------------------------------------
+app.use((err, req, res, next) => {
+  console.error(err);
+  res.status(500).json({ error: 'Something broke on our end. Your data is safe; try again.' });
+});
+
+app.listen(PORT, () => {
+  console.log(`Sage listening on :${PORT} — data in ${DATA_DIR}, AI ${AI_API_KEY ? `on (${AI_PROVIDER}/${AI_MODEL})` : 'off (structure still works)'}`);
+});

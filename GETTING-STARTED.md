@@ -1,0 +1,108 @@
+# Getting Sage running 🌿
+
+Written for a non-developer. Follow it top to bottom; it takes about fifteen
+minutes, most of which is waiting.
+
+---
+
+## 1. Put it on the internet (Render)
+
+1. Go to **[render.com](https://render.com)** and sign in with GitHub.
+2. Click **New +** → **Blueprint**.
+3. Pick this repository. Render reads `render.yaml` and sets everything up.
+4. Click **Apply**.
+
+Render creates the web service and a 1 GB disk that holds the database. The
+first build takes a few minutes.
+
+## 2. Turn on the thinking layer (optional but recommended)
+
+Without this, Sage still works — capture falls back to simple rules, and
+every view, routine, and trigger behaves exactly the same. With it, Sage can
+understand "we're going to the lake Friday" and "I paid Terminix."
+
+1. Get an API key:
+   - **Anthropic** — [console.anthropic.com](https://console.anthropic.com) → API Keys
+   - or **OpenAI** — [platform.openai.com](https://platform.openai.com) → API Keys
+2. In Render: your service → **Environment** → **Add Environment Variable**
+   - Key: `AI_API_KEY` · Value: the key you copied
+   - If using OpenAI, also set `AI_PROVIDER` to `openai`
+3. **Save changes.** Render restarts on its own.
+
+Cost is a few cents a month at this usage. Set a spending limit in the
+provider's console if that's reassuring.
+
+## 3. Claim the app
+
+1. Open your Render URL (something like `sage-xxxx.onrender.com`).
+2. Enter name, email, and a password of 8+ characters. **Write the password
+   down somewhere real.**
+3. That's it — the first person to sign up owns the app, and signup then
+   closes. Nobody else can get in.
+
+Sage arrives already knowing the starter routines: summer morning, evening
+closing, the lake departure checklist, weekly water run, patio kitchen
+check, rain check, guest prep, Monday garbage, and home PT.
+
+## 4. Put it on the home screen (do this — it matters)
+
+On the iPhone, in **Safari**:
+
+1. Open the Sage URL.
+2. Tap the **Share** button (the square with the arrow).
+3. Scroll and tap **Add to Home Screen** → **Add**.
+
+Now it has an icon and opens full-screen with no browser bars, like any
+other app. Voice capture works properly this way too.
+
+## 5. Subscribe to the calendar feed
+
+So dated things show up on the real calendar and the Apple Watch:
+
+1. In Sage: **More** → **Settings** → **Subscribe on this phone**.
+2. Tap through the prompt Calendar shows.
+
+Heads up: subscribed calendars refresh on the phone's own schedule (usually
+a few times a day), so a brand-new date can take a little while to appear.
+
+---
+
+## Using it
+
+**The one habit:** when a thought arrives, tap **Tell Sage** and say it.
+That's the whole system. Everything else is Sage's job.
+
+- *"Good morning Sage. 150.0."* → records weight, opens the morning view
+- *"We're going to the lake Friday."* → wakes up trip planning and the
+  departure checklist
+- *"I paid Terminix."* → finds that task and marks it done
+- *"Remind me to call the insurance company Tuesday."* → a dated task
+- *"The windows need resurfacing but not until September."* → waits until
+  September instead of nagging in July
+
+**When Sage gets something wrong** — open the item and say what's wrong in
+the box at the top: *"that isn't urgent, leave it until September"* or
+*"that's for the lake."* No forms, no categories to learn.
+
+**If Sage did something on its own** you'll see a strip at the top of Now
+saying so, with an **Undo** button.
+
+**Recent captures** (More → 📥) shows everything you said and what Sage made
+of it. Useful in the first weeks while you're deciding whether to trust it.
+
+---
+
+## When something's weird
+
+| Problem | Try this |
+|---|---|
+| Can't sign in | The password is the one you set at step 3. There's no reset link — that's the tradeoff of a private single-account app. |
+| Capture is very literal | `AI_API_KEY` isn't set, or is wrong. Check Render → Environment. |
+| Weather isn't showing | The coordinates for your places may need adjusting (More → Settings → Places). |
+| Calendar dates aren't appearing | Subscribed calendars refresh slowly. Give it a few hours. |
+| App seems asleep on first open | Render's starter plan sleeps when idle; the first open takes a few seconds. |
+
+## Your data is yours
+
+**More → Settings → Export everything** downloads the whole thing as a JSON
+file, any time. Worth doing occasionally and keeping somewhere safe.
