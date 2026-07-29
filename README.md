@@ -13,12 +13,22 @@ Say something once, in ordinary language, and stop carrying it.
 
 ## The architectural rule
 
-**The database is the source of truth. The AI is the reasoning layer.**
+**The database is the source of truth. Retrieval decides what matters.
+The AI reasons over that.**
 
 Nothing here depends on a chat history. Structured state lives in SQLite. On
 each interaction the AI receives the *current* state, reasons about it, and
 proposes structured updates that Regena approves. Close the app for a month
 and everything is exactly where she left it.
+
+Between the database and the reasoning sits a selection layer. Sending the
+whole open list is the easy mistake, and it is why most assistants feel like
+they are searching a database rather than knowing you. `selectContext()`
+picks the handful that matter — what is live right now, and what her words
+actually point at, scored by how distinctive each word is in her own data —
+and states how much it left out so the reasoning layer never mistakes its
+slice for the whole picture. Typically **9 items out of 51**, with a reason
+attached to each.
 
 The AI provider sits behind a single `askAI()` function. Paste a key and
 nothing else: the provider is detected from the key's shape, and the model is

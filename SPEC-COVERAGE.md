@@ -46,7 +46,7 @@ request and needs no key.
 | Implementation target | **PWA, iPhone-first**, added to the home screen. Native iOS would add App Store, Xcode and yearly fees for one user with no benefit. |
 | Backend + cost | Node/Express + SQLite on a Render persistent disk. ~$7–14/month plus a few cents of AI. |
 | Auth + recovery | Single account, bcrypt, httpOnly cookie, 120-day session. Recovery server-side. |
-| AI abstraction | One `askAI()` interface. The **provider is detected from the key's shape** and the **model is chosen automatically** per request from the provider's live model list — nothing to configure but the key. Context is minimized to open items, projects, locations and today's weather; never the whole database. |
+| AI abstraction | One `askAI()` interface. The **provider is detected from the key's shape** and the **model is chosen automatically** per request from the provider's live model list — nothing to configure but the key. Context is chosen by the retrieval layer — typically 9 of 51 open items, each with a reason — never the whole database. |
 | Apple Calendar/Reminders | Both directions, and **both her calendar systems**. Feed **out** (subscribe once, real alerts, prep lead times); read **in** from iCloud over CalDAV and from Google via its private `.ics` link — read-only. Reminders deliberately untouched: they work, and duplicating them would only add noise. |
 | Notifications | The calendar feed carries the reliable ones, including preparation lead times. Web push is possible once installed to the home screen. |
 | Weather/location | open-meteo on **fixed coordinates per place**. No permission prompt, no GPS, no battery cost — and her places don't move. |
@@ -138,6 +138,51 @@ Verified end to end:
 | Recurrence expansion (12 patterns) | ✅ weekly, every-other-week with COUNT, third Sunday, last Friday, yearly all-day birthday, UNTIL, EXDATE, edited occurrence, monthly-31st skipping short months, window clipping |
 | iCalendar parsing | ✅ timed events keep local time, all-day stays date-only, folded lines rejoin, cancellations dropped |
 | "PT" inferred, "Joe Ward Birthday" correctly left alone | ✅ |
+
+
+## The retrieval layer
+
+Sage (the GPT) made the sharpest critique of this build, and it was right:
+
+> There are really three layers, not two. Database → **Retrieval** → AI.
+> Most assistants fail at layer 2. They either retrieve almost nothing, or
+> they retrieve everything.
+
+The first version retrieved everything — every open item on every request.
+With 51 seeded items that is already noise, and it grows with her life. It
+is also the exact failure that makes an assistant feel like it is searching
+a database rather than knowing you.
+
+`selectContext()` now chooses. Two questions decide what the reasoning layer
+sees:
+
+**What is live right now** — today's appointments (from either calendar),
+routines still pending, anything due now or this week, opportunities eligible
+today, and seasonal work whose window has just opened. Weather is included
+only when something actually turns on it.
+
+**What her words point at** — items scored by how *distinctive* the matching
+words are. Terminix appears in one item and means everything; "Sage" appears
+across half her notes and means nothing, because she says it every morning.
+Rarity is measured against her own data rather than a hand-written list, so
+it keeps working as her life changes. Conversational framing — greetings, the
+assistant's name, "remind me" — is dropped before scoring.
+
+Every selected item carries **why** it was chosen, and the payload states how
+many items were left out, so the reasoning layer can never mistake its slice
+for the whole picture and tell her she has nothing else on.
+
+| Capture | Selected | Word-matched |
+|---|---|---|
+| "I paid Terminix" | 7 of 51 | **Pay Terminix** — the one right thing |
+| "Good morning Sage. 150.0." | 7 of 51 | nothing spurious |
+| "we're going to the lake Friday" | 14 of 51 | the lake trip, the lake hosting date, lake supplies |
+| "what about the curtains" | 8 of 51 | **Hem the pink bedroom curtains** |
+| "did I ever call about the August 24th thing" | 9 of 51 | **Call to change the August 24 appointment** |
+| "I bought jewelry organizers" | 9 of 51 | the jewelry project and its next action |
+
+Average: **9 of 51 items**. Inspectable at any time via `GET /api/ai/context`
+— retrieval you can check rather than trust.
 
 ## Not in Sage, on purpose
 

@@ -1125,25 +1125,144 @@ function heuristicCapture(text, ctx) {
   return proposals;
 }
 
-function contextForAI(uid, ctx) {
-  const open = openItems(uid);
-  const byId = new Map(open.map((i) => [i.id, i]));
-  const brief = open.slice(0, 120).map((i) => ({
-    id: i.id, title: i.title, type: i.type, status: i.status, importance: i.importance,
+// ---------------------------------------------------------------------------
+// RETRIEVAL — the layer between the database and the reasoning.
+//
+// Sending the whole open list is the easy mistake, and it is why most
+// assistants feel like they are searching a database rather than knowing you.
+// The database can hold hundreds of things; almost none of them matter at
+// 7am on a Wednesday. This selects the handful that do — by what is live
+// right now, and by what her words actually point at — and says plainly how
+// much it left out, so the reasoning layer never mistakes its slice for the
+// whole picture.
+// ---------------------------------------------------------------------------
+const STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'that', 'this', 'from', 'have', 'has', 'was', 'you',
+  'your', 'are', 'not', 'but', 'all', 'get', 'got', 'out', 'off', 'one', 'two', 'into', 'about', 'need',
+  'needs', 'just', 'can', 'will', 'when', 'then', 'than', 'they', 'them', 'her', 'his', 'its', 'did', 'done',
+  'today', 'tomorrow', 'week', 'now', 'still', 'some', 'any', 'more', 'been', 'were', 'what', 'who', 'why',
+  // How she talks to Sage, rather than what she is talking about. "Good
+  // morning Sage" is a greeting every day; the assistant's own name appears
+  // throughout her notes too, so left in it would match half her life.
+  'sage', 'good', 'morning', 'afternoon', 'evening', 'night', 'hello', 'hey', 'okay', 'please', 'thanks',
+  'remind', 'reminder', 'remember', 'note', 'add', 'put',
+]);
+
+function tokenize(s) {
+  return (String(s || '').toLowerCase().match(/[a-z0-9']{3,}/g) || []).filter((t) => !STOPWORDS.has(t));
+}
+
+function itemTokens(i) {
+  return new Set(tokenize(`${i.title} ${i.note} ${i.raw_capture} ${i.next_action} ${i.store} ${i.location} ${i.life_area}`));
+}
+
+// A word is only evidence if it is distinctive. "Terminix" appears in one
+// item and means everything; "Sage" appears across half her notes and means
+// nothing — she says it every morning. Rather than blocklisting words by
+// hand, weight each one by how rare it is in her own data, so this keeps
+// working as her life changes.
+function buildRelevance(live) {
+  const df = new Map();
+  const cache = new Map();
+  for (const i of live) {
+    const toks = itemTokens(i);
+    cache.set(i.id, toks);
+    for (const t of toks) df.set(t, (df.get(t) || 0) + 1);
+  }
+  const ubiquitous = Math.max(3, Math.ceil(live.length * 0.2));
+  return (item, tokens) => {
+    if (!tokens.length) return 0;
+    const hay = cache.get(item.id) || itemTokens(item);
+    let score = 0;
+    for (const t of tokens) {
+      if (!hay.has(t)) continue;
+      const freq = df.get(t) || 1;
+      if (freq > ubiquitous) continue;            // too common to mean anything
+      score += 1 / freq;                          // rarer word, stronger signal
+    }
+    return score;
+  };
+}
+
+function slim(i, why) {
+  return {
+    id: i.id, title: i.title, type: i.type, importance: i.importance,
     due_at: i.due_at || undefined, target_window: i.target_window || undefined,
-    blocked_by: itemBlockers(i, byId).length ? itemBlockers(i, byId) : undefined,
-    project_id: i.project_id || undefined,
-  }));
-  const projects = open.filter((i) => i.type === 'project').map((p) => ({ id: p.id, title: p.title, next_action: p.next_action }));
-  const locs = db.prepare('SELECT key, name FROM locations WHERE user_id = ?').all(uid);
-  // Her stable operating context travels with every request — it is what keeps
-  // Sage sounding like Sage rather than a task manager (spec §2, §24).
+    next_action: i.next_action || undefined,
+    blocked_by: (i.blockers && i.blockers.length) ? i.blockers : undefined,
+    why,
+  };
+}
+
+function selectContext(uid, ctx, { text = '', budget = 24, routines = [] } = {}) {
+  const all = openItems(uid);
+  const byId = new Map(all.map((i) => [i.id, i]));
+  const live = all.map((i) => ({ ...i, blockers: itemBlockers(i, byId) }));
+  const t = ctx.date;
+
+  const unblocked = live.filter((i) => !i.blockers.length && i.type !== 'project');
+  const dueNow = unblocked.filter((i) => i.due_at && i.due_at.slice(0, 10) <= t);
+  const dueSoon = unblocked.filter((i) => i.due_at && i.due_at.slice(0, 10) > t && i.due_at.slice(0, 10) <= daysFrom(t, 7));
+  const eligible = unblocked.filter((i) => (i.importance === 'opportunity' || i.type === 'opportunity') && eligibleOpportunity(i, ctx));
+  // Seasonal work whose moment has just arrived — the windows opening is
+  // exactly the kind of thing she would otherwise never be reminded of.
+  const justOpened = unblocked.filter((i) => i.window_start && i.window_start <= t && i.window_start >= daysFrom(t, -21));
+
+  const tokens = [...new Set(tokenize(text))];
+  const relevance = buildRelevance(live);
+  const matched = tokens.length
+    ? live.map((i) => ({ i, score: relevance(i, tokens) })).filter((x) => x.score >= 0.1)
+      .sort((a, b) => b.score - a.score || scoreItem(b.i) - scoreItem(a.i)).slice(0, 8).map((x) => x.i)
+    : [];
+
+  const chosen = new Map();
+  const take = (list, why, cap) => {
+    for (const i of (cap ? list.slice(0, cap) : list)) {
+      if (chosen.size >= budget) return;
+      if (!chosen.has(i.id)) chosen.set(i.id, slim(i, why));
+    }
+  };
+  // What she just said comes first — a completion has to find its target.
+  take(matched, 'matches what she said');
+  take(dueNow.sort((a, b) => scoreItem(b) - scoreItem(a)), 'due now');
+  take(dueSoon.sort((a, b) => (a.due_at).localeCompare(b.due_at)), 'due this week', 6);
+  take(eligible, 'fits today', 4);
+  take(justOpened, 'its season has arrived', 3);
+
+  const pending = routines.filter((r) => !r.complete)
+    .map((r) => ({ name: r.name, left: r.remaining, note: r.cadence_note || undefined }));
+
+  // Weather is only worth a slot when something actually turns on it.
+  const weatherMatters = ctx.weather && (ctx.weather.todayRain || ctx.weather.dryNextDays
+    || ctx.weather.todayHigh >= 90 || ctx.weather.todayLow <= 40);
+
   const prefs = Object.fromEntries(
-    db.prepare('SELECT key, value FROM preferences WHERE user_id = ?').all(uid).map((r) => [r.key, r.value]));
-  return { today: ctx.date, dayOfWeek: new Date(ctx.date + 'T12:00').toLocaleDateString('en-US', { weekday: 'long' }),
-    here: ctx.hereKey, locations: locs, weather: ctx.weather || undefined,
-    activeTrip: ctx.activeTrip || undefined, upcomingTrip: ctx.upcomingTrip || undefined,
-    aboutHer: prefs, openItems: brief, projects };
+    db.prepare('SELECT key, value FROM preferences WHERE user_id = ?').all(uid)
+      .filter((r) => r.key !== 'cal_last_sync').map((r) => [r.key, r.value]));
+
+  return {
+    today: t,
+    dayOfWeek: new Date(t + 'T12:00').toLocaleDateString('en-US', { weekday: 'long' }),
+    here: ctx.hereKey,
+    weather: weatherMatters ? { high: ctx.weather.todayHigh, low: ctx.weather.todayLow, rain: ctx.weather.todayRain } : undefined,
+    appointmentsToday: (ctx.events || []).map((e) => ({ title: e.title, at: e.event_start || 'all day', kind: e.event_kind || undefined })),
+    routinesPending: pending.length ? pending : undefined,
+    activeTrip: ctx.activeTrip || undefined,
+    upcomingTrip: ctx.upcomingTrip || undefined,
+    relevantItems: [...chosen.values()],
+    projects: live.filter((i) => i.type === 'project' && (i.next_action || chosen.has(i.id)))
+      .slice(0, 10).map((p) => ({ id: p.id, title: p.title, next_action: p.next_action || undefined })),
+    aboutHer: prefs,
+    // Honesty about the slice: without this the reasoning layer will happily
+    // conclude "you have nothing else on" from a partial view.
+    notShown: Math.max(0, all.length - chosen.size),
+    note: 'relevantItems is a deliberate selection, not the whole database. notShown counts what was left out as not currently relevant. Never claim she has nothing else pending.',
+  };
+}
+
+// Kept for callers that want everything (export, debugging).
+function contextForAI(uid, ctx) {
+  return selectContext(uid, ctx, { budget: 60 });
 }
 
 app.post('/api/capture', async (req, res) => {
@@ -1176,7 +1295,7 @@ Rules:
 - Resolve relative dates ("Friday", "tomorrow") to real dates.
 - Something not to be done until a season goes in target_window + window_start, not due_at.
 - If a task depends on another open item, set prereq_ids.`,
-    `Her capture: "${text}"\n\nCurrent state:\n${JSON.stringify(contextForAI(uid, ctx))}`,
+    `Her capture: "${text}"\n\nWhat is relevant right now:\n${JSON.stringify(selectContext(uid, ctx, { text, routines: await activeRoutines(uid, ctx.date, ctx) }))}`,
     { maxTokens: 1600, json: true, tier: captureTier(text) },
   );
 
@@ -1275,6 +1394,21 @@ app.post('/api/correct', async (req, res) => {
   res.json({ item: db.prepare('SELECT * FROM items WHERE id = ?').get(item.id), reply: parsed.reply || 'Updated.' });
 });
 
+// What did Sage actually look at? Retrieval you can inspect, rather than
+// trusting. Useful when an answer seems to have missed something obvious.
+app.get('/api/ai/context', async (req, res) => {
+  const uid = req.user.id;
+  const ctx = await buildContext(uid);
+  const routines = await activeRoutines(uid, ctx.date, ctx);
+  const selection = selectContext(uid, ctx, { text: String(req.query.text || ''), routines });
+  res.json({
+    selection,
+    size: { selected: selection.relevantItems.length, notShown: selection.notShown,
+      totalOpen: selection.relevantItems.length + selection.notShown,
+      approxChars: JSON.stringify(selection).length },
+  });
+});
+
 // Ask Sage something about her own state — reasoning over the database.
 app.post('/api/ask', async (req, res) => {
   const uid = req.user.id;
@@ -1284,7 +1418,7 @@ app.post('/api/ask', async (req, res) => {
   const routines = await activeRoutines(uid, ctx.date, ctx);
   const answer = await askAI(
     SAGE_PERSONA + '\n\nAnswer from the state given. Be brief. Lead with actions if any. If the state does not contain the answer, say so plainly rather than guessing.',
-    `Question: "${question}"\n\nState:\n${JSON.stringify({ ...contextForAI(uid, ctx), routinesToday: routines.map((r) => ({ name: r.name, remaining: r.remaining })) })}`,
+    `Question: "${question}"\n\nWhat is relevant right now:\n${JSON.stringify(selectContext(uid, ctx, { text: question, budget: 30, routines }))}`,
     // The thinking-partner path always gets the better model. This is where
     // "do you think you're rationalizing here?" either lands or doesn't.
     { maxTokens: 700, tier: 'smart' },
