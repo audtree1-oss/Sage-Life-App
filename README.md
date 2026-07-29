@@ -20,9 +20,12 @@ each interaction the AI receives the *current* state, reasons about it, and
 proposes structured updates that Regena approves. Close the app for a month
 and everything is exactly where she left it.
 
-The AI provider sits behind a single `askAI()` function and is chosen by two
-environment variables — Anthropic and OpenAI both work today, and swapping
-them changes no data and no business logic.
+The AI provider sits behind a single `askAI()` function. Paste a key and
+nothing else: the provider is detected from the key's shape, and the model is
+chosen automatically per request from the provider's own live model list — a
+fast one for sorting what she says, a stronger one for thinking with her,
+decided by how much is actually in the capture. Swapping providers changes no
+data and no business logic.
 
 ## What's inside
 
@@ -56,9 +59,12 @@ them changes no data and no business logic.
   until September."*
 - **Undo for anything Sage did on its own** — auto-applied changes appear in
   a strip on Now with an Undo button. Trust needs a visible undo.
-- **Phone calendar feed** — subscribe once and Sage's dated items appear on
-  the real Apple/Google calendar, with real alerts on phone and watch,
-  including preparation lead times.
+- **Her calendar, both directions** — Sage's dated items flow *out* to the
+  real Apple calendar (real alerts on phone and watch, including preparation
+  lead times), and her iCloud appointments flow *in* over CalDAV, read-only.
+  Sage never writes to her calendar. And her real appointments drive the
+  trigger engine: a PT appointment on iCloud switches off home PT here, with
+  no data entry at all.
 - **Export everything** as JSON, any time. Her data is hers.
 
 ## Accessibility
@@ -99,9 +105,10 @@ npm start          # http://localhost:3000, data in ./data
 |---|---|---|
 | `PORT` | `3000` | HTTP port |
 | `DATA_DIR` | `./data` | SQLite DB + uploads |
-| `AI_PROVIDER` | `anthropic` | `anthropic` or `openai` |
-| `AI_API_KEY` | *(unset)* | Enables the reasoning layer |
-| `AI_MODEL` | per provider | Override the model |
+| `AI_API_KEY` | *(unset)* | Enables the reasoning layer. Everything else is inferred. |
+| `AI_PROVIDER` | auto | Override detection (`anthropic` / `openai`) |
+| `AI_MODEL_FAST` | auto | Override the sorting model |
+| `AI_MODEL_SMART` | auto | Override the thinking model |
 
 Without `AI_API_KEY` the app still runs: capture falls back to rules, and
 every view, routine, trigger, and checklist works exactly the same. The

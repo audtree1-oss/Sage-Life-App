@@ -15,7 +15,7 @@ minutes, most of which is waiting.
 Render creates the web service and a 1 GB disk that holds the database. The
 first build takes a few minutes.
 
-## 2. Turn on the thinking layer (optional but recommended)
+## 2. Turn on the thinking layer (recommended)
 
 Without this, Sage still works — capture falls back to simple rules, and
 every view, routine, and trigger behaves exactly the same. With it, Sage can
@@ -26,8 +26,13 @@ understand "we're going to the lake Friday" and "I paid Terminix."
    - or **OpenAI** — [platform.openai.com](https://platform.openai.com) → API Keys
 2. In Render: your service → **Environment** → **Add Environment Variable**
    - Key: `AI_API_KEY` · Value: the key you copied
-   - If using OpenAI, also set `AI_PROVIDER` to `openai`
+   - That's the only thing to set. Sage works out which company the key
+     belongs to, and picks the model itself — a quick one for sorting what
+     you say, a stronger one for thinking with you.
 3. **Save changes.** Render restarts on its own.
+
+You can confirm it worked in **More → Settings → Thinking layer**, which
+shows the models it chose.
 
 Cost is a few cents a month at this usage. Set a spending limit in the
 provider's console if that's reassuring.
@@ -55,7 +60,26 @@ On the iPhone, in **Safari**:
 Now it has an icon and opens full-screen with no browser bars, like any
 other app. Voice capture works properly this way too.
 
-## 5. Subscribe to the calendar feed
+## 5. Let Sage see your iCloud calendar
+
+So Today and This Week show your real appointments — and so a PT appointment
+switches off your home PT rounds by itself.
+
+1. On a computer or phone, go to **appleid.apple.com** and sign in.
+2. **Sign-In and Security** → **App-Specific Passwords** → **+**
+3. Name it **Sage**, and copy the password it gives you (four groups of four
+   letters).
+4. In Sage: **More** → **Settings** → **Connect iCloud**. Enter your Apple ID
+   and paste that password.
+
+Your real Apple password never goes into Sage. The app-specific password is
+stored encrypted, is used only to *read*, and you can cancel it from
+appleid.apple.com any time — Sage loses access immediately and nothing else
+is affected.
+
+**Sage never writes to your calendar.** It only looks.
+
+## 6. Subscribe to the calendar feed
 
 So dated things show up on the real calendar and the Apple Watch:
 

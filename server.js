@@ -231,6 +231,42 @@ CREATE TABLE IF NOT EXISTS history (
   undoable TEXT NOT NULL DEFAULT '',           -- JSON snapshot for one-tap undo
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- iCloud calendar, read-only. The credential is an app-specific password,
+-- encrypted at rest, revocable from appleid.apple.com without touching Sage.
+CREATE TABLE IF NOT EXISTS cal_account (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  apple_id TEXT NOT NULL,
+  password_enc TEXT NOT NULL,
+  principal_url TEXT NOT NULL DEFAULT '',
+  home_url TEXT NOT NULL DEFAULT '',
+  last_sync TEXT NOT NULL DEFAULT '',
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS cal_calendars (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  url TEXT NOT NULL,
+  name TEXT NOT NULL,
+  color TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  UNIQUE(user_id, url)
+);
+CREATE TABLE IF NOT EXISTS cal_events (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  calendar_id INTEGER NOT NULL REFERENCES cal_calendars(id) ON DELETE CASCADE,
+  uid TEXT NOT NULL,
+  title TEXT NOT NULL,
+  start TEXT NOT NULL,
+  end TEXT NOT NULL DEFAULT '',
+  all_day INTEGER NOT NULL DEFAULT 0,
+  location TEXT NOT NULL DEFAULT '',
+  event_kind TEXT NOT NULL DEFAULT '',
+  UNIQUE(user_id, uid)
+);
+CREATE INDEX IF NOT EXISTS idx_cal_events_start ON cal_events(user_id, start);
 `);
 
 // ---------------------------------------------------------------------------
@@ -447,17 +483,31 @@ async function buildContext(uid, date = today()) {
   const here = locs.find((l) => l.key === hereKey) || locs[0] || null;
   const weather = here ? await getWeather(here.lat, here.lon) : null;
 
-  const events = db.prepare(`
+  const ownEvents = db.prepare(`
     SELECT * FROM items WHERE user_id = ? AND type = 'event' AND status = 'open'
       AND substr(COALESCE(NULLIF(event_start,''), due_at), 1, 10) = ?
     ORDER BY event_start`).all(uid, date);
+  // Her iCloud appointments count the same as ones entered here: a PT
+  // appointment on her real calendar suppresses home PT (spec §9).
+  const externalEvents = db.prepare(`
+    SELECT * FROM cal_events WHERE user_id = ? AND substr(start, 1, 10) = ? ORDER BY start`).all(uid, date)
+    .map((e) => ({
+      id: `cal-${e.id}`, title: e.title, type: 'event', status: 'open', importance: 'must',
+      event_start: e.all_day ? '' : e.start, due_at: e.start.slice(0, 10),
+      event_kind: e.event_kind, location: e.location, external: 1, all_day: e.all_day,
+      note: '', prep_minutes: 0, blockers: [],
+    }));
+  const events = [...ownEvents, ...externalEvents]
+    .sort((a, b) => (a.event_start || '~').localeCompare(b.event_start || '~'));
   const eventKinds = new Set(events.map((e) => e.event_kind).filter(Boolean));
 
   // Hosting: day-of is best for freshness, the day before is acceptable —
   // so guest prep surfaces on both.
   const soonEvents = db.prepare(`
-    SELECT * FROM items WHERE user_id = ? AND type = 'event' AND status = 'open'
-      AND substr(COALESCE(NULLIF(event_start,''), due_at), 1, 10) BETWEEN ? AND ?`).all(uid, date, daysFrom(date, 1));
+    SELECT event_kind FROM items WHERE user_id = ? AND type = 'event' AND status = 'open'
+      AND substr(COALESCE(NULLIF(event_start,''), due_at), 1, 10) BETWEEN ? AND ?`).all(uid, date, daysFrom(date, 1))
+    .concat(db.prepare('SELECT event_kind FROM cal_events WHERE user_id = ? AND substr(start, 1, 10) BETWEEN ? AND ?')
+      .all(uid, date, daysFrom(date, 1)));
   const hostingSoon = soonEvents.some((e) => e.event_kind === 'hosting');
 
   return {
@@ -877,6 +927,9 @@ function partitionItems(uid, ctx) {
 app.get('/api/views/now', async (req, res) => {
   const uid = req.user.id;
   const date = req.query.date || today();
+  // Refresh iCloud in the background if it's gone stale — never block the view
+  // on someone else's server being slow.
+  syncCalendars(uid).catch(() => {});
   const ctx = await buildContext(uid, date);
   const p = partitionItems(uid, ctx);
   const routines = await activeRoutines(uid, date, ctx);
@@ -890,6 +943,8 @@ app.get('/api/views/now', async (req, res) => {
     return true;
   });
 
+  // ctx.events already merges her iCloud appointments with Sage's own.
+  p.events = ctx.events;
   const nextEvent = p.events.find((e) => !e.event_start || e.event_start.slice(11) >= new Date().toTimeString().slice(0, 5)) || p.events[0] || null;
   const immediate = [...p.overdue, ...p.dueToday].sort((a, b) => scoreItem(b) - scoreItem(a)).slice(0, 6);
   const weightToday = db.prepare("SELECT * FROM tracking WHERE user_id = ? AND kind = 'weight' AND date = ?").get(uid, date) || null;
@@ -913,7 +968,7 @@ app.get('/api/views/today', async (req, res) => {
   const routines = await activeRoutines(uid, date, ctx);
   res.json({
     date, here: ctx.here, weather: ctx.weather,
-    events: p.events,
+    events: ctx.events,
     must: [...p.overdue, ...p.dueToday].filter((i) => i.importance === 'must').sort((a, b) => scoreItem(b) - scoreItem(a)),
     should: [...p.overdue, ...p.dueToday].filter((i) => i.importance !== 'must').sort((a, b) => scoreItem(b) - scoreItem(a)),
     anytime: p.noDate.filter((i) => i.importance !== 'someday').sort((a, b) => scoreItem(b) - scoreItem(a)).slice(0, 12),
@@ -928,12 +983,19 @@ app.get('/api/views/week', async (req, res) => {
   const ctx = await buildContext(uid);
   const p = partitionItems(uid, ctx);
   const end = daysFromNow(7);
+  const external = db.prepare(`SELECT * FROM cal_events WHERE user_id = ? AND substr(start, 1, 10) BETWEEN ? AND ?`)
+    .all(uid, today(), end)
+    .map((e) => ({ id: `cal-${e.id}`, title: e.title, type: 'event', status: 'open', importance: 'must',
+      event_start: e.all_day ? '' : e.start, due_at: e.start.slice(0, 10), event_kind: e.event_kind,
+      location: e.location, external: 1, blockers: [] }));
   const days = [];
   for (let d = 0; d < 7; d++) {
     const date = daysFromNow(d);
     days.push({
       date,
-      events: p.all.filter((i) => i.type === 'event' && (i.event_start || i.due_at).slice(0, 10) === date),
+      events: [...p.all.filter((i) => i.type === 'event' && (i.event_start || i.due_at).slice(0, 10) === date),
+        ...external.filter((e) => e.due_at === date)]
+        .sort((a, b) => (a.event_start || '~').localeCompare(b.event_start || '~')),
       items: p.all.filter((i) => i.type !== 'event' && i.due_at && i.due_at.slice(0, 10) === date && !i.blockers.length),
     });
   }
@@ -1226,6 +1288,125 @@ app.post('/api/ask', async (req, res) => {
     { maxTokens: 700, tier: 'smart' },
   );
   res.json({ answer: answer || 'The AI layer is not configured, so I can only show you what is stored — try the Today view.' });
+});
+
+// ---------------------------------------------------------------------------
+// iCloud calendar IN — read-only. Her real appointments become context, and
+// drive the trigger engine (a PT appointment there suppresses home PT here).
+// Sage never writes to her calendar; Apple Calendar stays the system of record.
+// ---------------------------------------------------------------------------
+const caldav = require('./caldav');
+const CAL_SYNC_MINUTES = 30;
+const CAL_WINDOW_BACK = 7;
+const CAL_WINDOW_FORWARD = 180;
+
+function calCreds(uid) {
+  const acct = db.prepare('SELECT * FROM cal_account WHERE user_id = ?').get(uid);
+  if (!acct) return null;
+  const password = caldav.decrypt(acct.password_enc, SESSION_SECRET);
+  if (!password) return { acct, password: null, stale: true };
+  return { acct, password };
+}
+
+async function syncCalendars(uid, { force = false } = {}) {
+  const creds = calCreds(uid);
+  if (!creds) return { connected: false };
+  if (creds.stale) {
+    db.prepare("UPDATE cal_account SET last_error = ? WHERE user_id = ?")
+      .run('Stored credential could not be read — please reconnect.', uid);
+    return { connected: true, error: 'reconnect' };
+  }
+  const { acct, password } = creds;
+  if (!force && acct.last_sync) {
+    const age = (Date.now() - new Date(acct.last_sync + 'Z').getTime()) / 60000;
+    if (age < CAL_SYNC_MINUTES) return { connected: true, skipped: true };
+  }
+
+  try {
+    const cals = await caldav.listCalendars(acct.home_url, acct.apple_id, password);
+    const upsert = db.prepare(`INSERT INTO cal_calendars (user_id, url, name, color) VALUES (?, ?, ?, ?)
+      ON CONFLICT(user_id, url) DO UPDATE SET name = excluded.name, color = excluded.color`);
+    for (const c of cals) upsert.run(uid, c.url, c.name, c.color);
+
+    const enabled = db.prepare('SELECT * FROM cal_calendars WHERE user_id = ? AND enabled = 1').all(uid);
+    const from = daysFromNow(-CAL_WINDOW_BACK);
+    const to = daysFromNow(CAL_WINDOW_FORWARD);
+    const seen = new Set();
+    const insEvent = db.prepare(`INSERT INTO cal_events (user_id, calendar_id, uid, title, start, end, all_day, location, event_kind)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(user_id, uid) DO UPDATE SET title = excluded.title, start = excluded.start,
+        end = excluded.end, all_day = excluded.all_day, location = excluded.location,
+        event_kind = excluded.event_kind, calendar_id = excluded.calendar_id`);
+
+    for (const cal of enabled) {
+      const events = await caldav.fetchEvents(cal.url, acct.apple_id, password, from, to);
+      for (const e of events.slice(0, 2000)) {
+        if (!e.start) continue;
+        seen.add(e.uid);
+        insEvent.run(uid, cal.id, e.uid, e.title, e.start, e.end, e.all_day, e.location, caldav.inferEventKind(e.title));
+      }
+    }
+    // Drop anything that vanished from Apple's side (deleted or moved out of range).
+    const stale = db.prepare('SELECT uid FROM cal_events WHERE user_id = ?').all(uid)
+      .map((r) => r.uid).filter((u) => !seen.has(u));
+    const del = db.prepare('DELETE FROM cal_events WHERE user_id = ? AND uid = ?');
+    for (const u of stale) del.run(uid, u);
+
+    db.prepare("UPDATE cal_account SET last_sync = datetime('now'), last_error = '' WHERE user_id = ?").run(uid);
+    return { connected: true, calendars: enabled.length, events: seen.size };
+  } catch (e) {
+    db.prepare('UPDATE cal_account SET last_error = ? WHERE user_id = ?').run(String(e.message).slice(0, 300), uid);
+    return { connected: true, error: String(e.message) };
+  }
+}
+
+app.post('/api/calendar/connect', async (req, res) => {
+  const appleId = String((req.body || {}).apple_id || '').trim();
+  const password = String((req.body || {}).password || '').replace(/\s+/g, '');
+  if (!appleId || !password) return res.status(400).json({ error: 'Need the Apple ID and an app-specific password.' });
+  try {
+    const { principalUrl, homeUrl } = await caldav.discover(appleId, password);
+    db.prepare(`INSERT INTO cal_account (user_id, apple_id, password_enc, principal_url, home_url)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(user_id) DO UPDATE SET apple_id = excluded.apple_id, password_enc = excluded.password_enc,
+        principal_url = excluded.principal_url, home_url = excluded.home_url, last_error = '', last_sync = ''`)
+      .run(req.user.id, appleId, caldav.encrypt(password, SESSION_SECRET), principalUrl, homeUrl);
+    const result = await syncCalendars(req.user.id, { force: true });
+    logHistory(req.user.id, 'calendar', 0, 'connected', appleId);
+    if (result.error) return res.status(502).json({ error: result.error });
+    res.json({ ok: true, ...result });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.get('/api/calendar/status', (req, res) => {
+  const acct = db.prepare('SELECT apple_id, last_sync, last_error FROM cal_account WHERE user_id = ?').get(req.user.id);
+  if (!acct) return res.json({ connected: false });
+  res.json({
+    connected: true, apple_id: acct.apple_id, last_sync: acct.last_sync, last_error: acct.last_error,
+    calendars: db.prepare('SELECT id, name, color, enabled FROM cal_calendars WHERE user_id = ? ORDER BY name').all(req.user.id),
+    event_count: db.prepare('SELECT COUNT(*) AS n FROM cal_events WHERE user_id = ?').get(req.user.id).n,
+  });
+});
+
+app.post('/api/calendar/sync', async (req, res) => res.json(await syncCalendars(req.user.id, { force: true })));
+
+app.patch('/api/calendar/calendars/:id', (req, res) => {
+  db.prepare('UPDATE cal_calendars SET enabled = ? WHERE id = ? AND user_id = ?')
+    .run((req.body || {}).enabled ? 1 : 0, req.params.id, req.user.id);
+  if (!(req.body || {}).enabled) {
+    db.prepare('DELETE FROM cal_events WHERE user_id = ? AND calendar_id = ?').run(req.user.id, req.params.id);
+  }
+  res.json({ ok: true });
+});
+
+app.delete('/api/calendar/connect', (req, res) => {
+  db.prepare('DELETE FROM cal_events WHERE user_id = ?').run(req.user.id);
+  db.prepare('DELETE FROM cal_calendars WHERE user_id = ?').run(req.user.id);
+  db.prepare('DELETE FROM cal_account WHERE user_id = ?').run(req.user.id);
+  logHistory(req.user.id, 'calendar', 0, 'disconnected', '');
+  res.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------
