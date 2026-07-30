@@ -121,6 +121,15 @@ That's the whole system. Everything else is Sage's job.
 - *"The windows need resurfacing but not until September."* → waits until
   September instead of nagging in July
 
+**To let your ChatGPT Sage see this app** — **More → Settings → 🤖 ChatGPT**.
+It gives you a link and a key to paste into your Sage GPT's *Actions* (on a
+computer; about five minutes, once). After that you can ask ChatGPT "what's on
+today?" or "did I write down the Terminix thing?" and it will actually know.
+
+It can only **read**. It can never add, change or finish anything — that still
+happens here, where you approve it. Disconnect any time from the same screen
+and it stops working immediately.
+
 **Staying signed in** is fine and intended — every time you open Sage the
 session slides forward, so it won't log you out. Your phone's own lock (and
 Face ID, in Settings) is what actually protects it. Signing out everywhere is

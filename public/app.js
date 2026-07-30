@@ -999,6 +999,8 @@ VIEWS.settings = async function renderSettings() {
       <p class="quiet" style="font-size:.78em;margin:8px 0 0">This changes tone only. The rules that keep Sage honest — never
       inventing that something's done, never nagging about things that aren't ready — stay put.</p>
     </div>
+    <h2>🤖 ChatGPT</h2>
+    <div id="gpt-box"><div class="card"><span class="quiet">Checking…</span></div></div>
     <h2>🧠 Thinking layer</h2>
     <div class="card" id="ai-status"><span class="quiet">${AI_ON ? 'Checking…' : 'No key set — capture still works, just more literally.'}</span></div>
     <div class="card">
@@ -1057,6 +1059,7 @@ VIEWS.settings = async function renderSettings() {
   }).catch(() => {});
   renderICloudBox();
   renderSecurityBox();
+  renderGptBox();
   if (AI_ON) api('/api/ai/status').then((s) => {
     const el = $('#ai-status');
     if (!el) return;
@@ -1128,6 +1131,68 @@ async function renderSecurityBox() {
 // ---------------------------------------------------------------------------
 // iCloud calendar, read-only
 // ---------------------------------------------------------------------------
+async function renderGptBox() {
+  const box = $('#gpt-box');
+  if (!box) return;
+  const s = await api('/api/gpt-key').catch(() => null);
+  if (!s) return;
+  box.innerHTML = s.key ? `
+    <div class="card">
+      <b>✅ Connected</b>
+      <div class="quiet" style="margin-top:4px">Your ChatGPT Sage can look things up here.
+        ${s.key.use_count ? `Used ${s.key.use_count} time${s.key.use_count === 1 ? '' : 's'}${s.key.last_used ? `, last ${fmtDate(s.key.last_used.slice(0, 10))}` : ''}.` : 'It hasn’t asked yet.'}</div>
+      <p class="quiet" style="margin:8px 0 0">It can only <b>read</b>. Adding or finishing things still happens here, where you approve them.</p>
+      <div class="btn-row" style="margin-top:10px">
+        <button class="btn ghost small" id="gpt-new">Make a new key</button>
+        <button class="btn danger small" id="gpt-off">Disconnect</button>
+      </div>
+    </div>` : `
+    <div class="card">
+      <b>Let your ChatGPT Sage see this app</b>
+      <p class="quiet" style="margin:4px 0 10px">Then you can ask it “what’s on today?” or “did I write down the Terminix thing?” and it will actually know.
+        It can only read — it can never change anything.</p>
+      <button class="btn small" id="gpt-on">Set it up</button>
+    </div>`;
+  if ($('#gpt-on')) $('#gpt-on').onclick = () => makeGptKey(s.schema_url);
+  if ($('#gpt-new')) $('#gpt-new').onclick = () => makeGptKey(s.schema_url);
+  if ($('#gpt-off')) $('#gpt-off').onclick = async () => {
+    if (!confirm('Disconnect ChatGPT? It will stop being able to see anything here.')) return;
+    await api('/api/gpt-key', { method: 'DELETE' });
+    toast('Disconnected.');
+    renderGptBox();
+  };
+}
+
+async function makeGptKey(schemaUrl) {
+  const r = await api('/api/gpt-key', { method: 'POST' });
+  const m = openModal(`
+    <h2>🤖 Connect ChatGPT</h2>
+    <p class="sub">This takes a few minutes on a computer, and you only do it once.</p>
+    <div class="card sage" style="font-size:.9em">
+      <b>In ChatGPT</b>
+      <ol style="margin:8px 0 0 -12px;line-height:1.75">
+        <li>Open your <b>Sage</b> GPT → <b>Edit</b> → <b>Configure</b></li>
+        <li>Scroll down to <b>Actions</b> → <b>Create new action</b></li>
+        <li>Under Schema choose <b>Import from URL</b> and paste the first box below</li>
+        <li>Under Authentication choose <b>API Key</b>, type <b>Bearer</b>, and paste the second box</li>
+        <li>Save, and update your GPT</li>
+      </ol>
+    </div>
+    <label class="field">1. Schema URL</label>
+    <div class="btn-row"><input type="text" id="gpt-url" value="${esc(r.schema_url || schemaUrl)}" readonly style="flex:1">
+      <button class="btn small" id="gpt-copyurl">Copy</button></div>
+    <label class="field">2. Your key — copy it now, it isn't shown again</label>
+    <div class="btn-row"><input type="text" id="gpt-token" value="${esc(r.token)}" readonly style="flex:1">
+      <button class="btn small" id="gpt-copykey">Copy</button></div>
+    <p class="quiet" style="font-size:.8em;margin-top:12px">Keep the key private — anyone with it could read this app.
+      You can disconnect from Settings at any time and it stops working immediately.
+      When ChatGPT looks something up, what it reads goes to OpenAI, the same as anything else you type there.</p>
+    <div style="margin-top:14px"><button class="btn big" id="gpt-done">Done</button></div>`);
+  $('#gpt-copyurl', m).onclick = async () => { await navigator.clipboard.writeText($('#gpt-url', m).value); toast('Copied.'); };
+  $('#gpt-copykey', m).onclick = async () => { await navigator.clipboard.writeText($('#gpt-token', m).value); toast('Copied. Paste it into ChatGPT now.'); };
+  $('#gpt-done', m).onclick = () => { closeModal(); renderGptBox(); };
+}
+
 async function renderICloudBox() {
   const box = $('#icloud-box');
   if (!box) return;

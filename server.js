@@ -306,6 +306,19 @@ CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id, id);
 -- Durable things learned about her — not tasks, not chat. Nothing lands here
 -- without her approving it, and everything here is visible and deletable,
 -- because memory she cannot inspect is memory she cannot trust.
+-- A read-only key so her ChatGPT Sage can look things up here. Deliberately
+-- separate from her password and her session: revocable on its own, and it
+-- can only ever read.
+CREATE TABLE IF NOT EXISTS api_tokens (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token TEXT NOT NULL UNIQUE,
+  label TEXT NOT NULL DEFAULT 'ChatGPT',
+  last_used TEXT NOT NULL DEFAULT '',
+  use_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS memories (
   id INTEGER PRIMARY KEY,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -785,6 +798,128 @@ app.post('/api/logout-all', (req, res) => {
   db.prepare('DELETE FROM sessions WHERE user_id = ?').run(user.id);
   res.setHeader('Set-Cookie', `${COOKIE}=; Path=/; HttpOnly; Max-Age=0`);
   res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// THE CHATGPT BRIDGE
+//
+// Regena talks to a Sage in ChatGPT as well as this one. She asked whether
+// that Sage could see what's actually going on in here — so it can.
+//
+// Three deliberate limits:
+//   READ ONLY. There is no write path on these routes at all. ChatGPT can
+//   look; changing anything still happens in the app, where she approves it.
+//   That is the same rule the rest of Sage runs on, and it matters more here,
+//   not less.
+//
+//   ITS OWN KEY. A separate revocable token, not her password and not her
+//   session. Turning it off costs her nothing else.
+//
+//   NOTHING SENSITIVE. It serves the same view the reasoning layer gets:
+//   tasks, routines, appointments, projects, memories. Not the calendar
+//   credential, not passkeys, not files.
+// ---------------------------------------------------------------------------
+function bearerUser(req) {
+  const header = String(req.headers.authorization || '');
+  const m = /^Bearer\s+(.+)$/i.exec(header.trim());
+  if (!m) return null;
+  const row = db.prepare(`
+    SELECT t.id AS token_id, u.id, u.name FROM api_tokens t JOIN users u ON u.id = t.user_id
+    WHERE t.token = ?`).get(m[1].trim());
+  if (!row) return null;
+  db.prepare("UPDATE api_tokens SET last_used = datetime('now'), use_count = use_count + 1 WHERE id = ?").run(row.token_id);
+  return { id: row.id, name: row.name };
+}
+
+function requireToken(req, res, next) {
+  const user = bearerUser(req);
+  if (!user) return res.status(401).json({ error: 'Sage could not verify that key. Check it in the app under Settings → ChatGPT.' });
+  req.user = user;
+  next();
+}
+
+// Everything relevant right now — the same shape Sage's own reasoning gets.
+app.get('/gpt/briefing', requireToken, async (req, res) => {
+  const uid = req.user.id;
+  const ctx = await buildContext(uid);
+  const routines = await activeRoutines(uid, ctx.date, ctx);
+  const sel = selectContext(uid, ctx, { text: String(req.query.about || ''), budget: 40, routines });
+  res.json({
+    for: req.user.name,
+    ...sel,
+    routinesToday: routines.map((r) => ({
+      name: r.name, remaining: r.remaining, complete: r.complete,
+      steps: r.steps.map((s) => ({ text: s.text, done: !!s.done })),
+      note: r.cadence_note || undefined,
+    })),
+    guidance: 'This is a read-only view of Regena\'s Sage app. You can see it; you cannot change it. If something needs adding, completing or deferring, tell her and let her do it in the app, where she approves each change.',
+  });
+});
+
+// Look anything up by name — "did I ever write down the Terminix thing?"
+app.get('/gpt/search', requireToken, (req, res) => {
+  const uid = req.user.id;
+  const q = String(req.query.q || '').trim();
+  if (!q) return res.status(400).json({ error: 'Give me something to look for.' });
+  const like = `%${q}%`;
+  res.json({
+    items: db.prepare(`SELECT id, title, note, type, status, importance, due_at, target_window, next_action, life_area
+      FROM items WHERE user_id = ? AND (title LIKE ? OR note LIKE ? OR raw_capture LIKE ?)
+      ORDER BY status = 'open' DESC, updated_at DESC LIMIT 25`).all(uid, like, like, like),
+    memories: db.prepare('SELECT content, kind FROM memories WHERE user_id = ? AND content LIKE ? LIMIT 15').all(uid, like),
+    routines: db.prepare(`SELECT r.name, r.cadence_note FROM routines r WHERE r.user_id = ? AND r.active = 1
+      AND (r.name LIKE ? OR EXISTS (SELECT 1 FROM routine_steps s WHERE s.routine_id = r.id AND s.text LIKE ?))
+      LIMIT 10`).all(uid, like, like),
+  });
+});
+
+// The durable context she has asked Sage to remember.
+app.get('/gpt/memories', requireToken, (req, res) => {
+  res.json({
+    memories: db.prepare('SELECT content, kind, pinned FROM memories WHERE user_id = ? ORDER BY pinned DESC, updated_at DESC LIMIT 200')
+      .all(req.user.id),
+    about: Object.fromEntries(db.prepare('SELECT key, value FROM preferences WHERE user_id = ?')
+      .all(req.user.id).filter((r) => !['cal_last_sync', 'voice', 'gentle_mornings'].includes(r.key)).map((r) => [r.key, r.value])),
+  });
+});
+
+// The schema ChatGPT reads to learn what it can ask for. Public on purpose —
+// it describes the shape of the API and contains no data and no key.
+app.get('/gpt/openapi.json', (req, res) => {
+  const base = `${req.protocol}://${req.get('host')}`;
+  res.json({
+    openapi: '3.1.0',
+    info: { title: 'Sage', description: 'Read-only access to Regena\'s Sage app: what is on today, her routines, projects, and what Sage remembers about her life.', version: '1.0.0' },
+    servers: [{ url: base }],
+    paths: {
+      '/gpt/briefing': {
+        get: {
+          operationId: 'getBriefing',
+          summary: 'What is going on right now — appointments, routines, what is due, opportunities, and relevant items.',
+          parameters: [{ name: 'about', in: 'query', required: false, schema: { type: 'string' },
+            description: 'Optional topic to focus the selection, e.g. "the lake" or "curtains".' }],
+          responses: { 200: { description: 'Current state', content: { 'application/json': { schema: { type: 'object' } } } } },
+        },
+      },
+      '/gpt/search': {
+        get: {
+          operationId: 'searchSage',
+          summary: 'Search her tasks, projects, memories and routines by keyword.',
+          parameters: [{ name: 'q', in: 'query', required: true, schema: { type: 'string' } }],
+          responses: { 200: { description: 'Matches', content: { 'application/json': { schema: { type: 'object' } } } } },
+        },
+      },
+      '/gpt/memories': {
+        get: {
+          operationId: 'getMemories',
+          summary: 'Durable things Sage has been asked to remember about her life, plus her operating principles.',
+          responses: { 200: { description: 'Memories', content: { 'application/json': { schema: { type: 'object' } } } } },
+        },
+      },
+    },
+    components: { securitySchemes: { bearerAuth: { type: 'http', scheme: 'bearer' } } },
+    security: [{ bearerAuth: [] }],
+  });
 });
 
 app.use('/api', requireAuth);
@@ -2246,6 +2381,29 @@ function recallMemories(uid, text = '', limit = 10) {
   }
   return chosen.map((m) => ({ id: m.id, kind: m.kind, content: m.content }));
 }
+
+// --- managing the ChatGPT key (from inside the app, cookie-authenticated) ---
+app.get('/api/gpt-key', (req, res) => {
+  const row = db.prepare('SELECT id, label, last_used, use_count, created_at FROM api_tokens WHERE user_id = ? ORDER BY id DESC').get(req.user.id);
+  res.json({ key: row || null, schema_url: `${req.protocol}://${req.get('host')}/gpt/openapi.json` });
+});
+
+app.post('/api/gpt-key', (req, res) => {
+  // One key at a time keeps this simple to reason about and to revoke.
+  db.prepare('DELETE FROM api_tokens WHERE user_id = ?').run(req.user.id);
+  const token = 'sage_' + crypto.randomBytes(24).toString('hex');
+  db.prepare('INSERT INTO api_tokens (user_id, token, label) VALUES (?, ?, ?)')
+    .run(req.user.id, token, String((req.body || {}).label || 'ChatGPT').slice(0, 40));
+  logHistory(req.user.id, 'gpt_key', 0, 'created', 'read-only key for ChatGPT');
+  // Shown once, here. It is not retrievable afterwards.
+  res.json({ token, schema_url: `${req.protocol}://${req.get('host')}/gpt/openapi.json` });
+});
+
+app.delete('/api/gpt-key', (req, res) => {
+  db.prepare('DELETE FROM api_tokens WHERE user_id = ?').run(req.user.id);
+  logHistory(req.user.id, 'gpt_key', 0, 'revoked', '');
+  res.json({ ok: true });
+});
 
 app.get('/api/memories', (req, res) => {
   const q = String(req.query.q || '').trim();
