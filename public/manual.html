@@ -1,0 +1,528 @@
+<title>Sage — how it works</title>
+
+<style>
+  /* Palette taken from the app itself, so the manual looks like the thing it
+     describes. Neutrals are green-biased on purpose — a flat grey would read
+     as belonging to some other application. */
+  :root {
+    --bg: #f4f6f2;
+    --paper: #ffffff;
+    --ink: #23291f;
+    --ink-soft: #6a7364;
+    --line: #dfe5d9;
+    --sage: #7d9a72;
+    --sage-deep: #57744c;
+    --sage-tint: #e9f0e6;
+    --clay: #a86a3d;
+    --clay-tint: #f7ebe1;
+    --alert: #b5563f;
+    --shadow: 0 1px 3px rgba(35, 41, 31, .07), 0 4px 14px rgba(35, 41, 31, .05);
+
+    --display: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    --body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+
+    --step-0: 1.0625rem;
+    --step-1: 1.1875rem;
+    --step-2: 1.5rem;
+    --step-3: 2rem;
+    --step-4: 2.75rem;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1b1f19;
+      --paper: #262b23;
+      --ink: #e8ece3;
+      --ink-soft: #a3ab9b;
+      --line: #363d32;
+      --sage: #8aa87e;
+      --sage-deep: #a3c096;
+      --sage-tint: #2b3527;
+      --clay: #d49b71;
+      --clay-tint: #3a2e25;
+      --alert: #dd8f7c;
+      --shadow: 0 1px 3px rgba(0, 0, 0, .3);
+    }
+  }
+  /* The reader's own toggle has to win in both directions. */
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #1b1f19;
+    --paper: #262b23;
+    --ink: #e8ece3;
+    --ink-soft: #a3ab9b;
+    --line: #363d32;
+    --sage: #8aa87e;
+    --sage-deep: #a3c096;
+    --sage-tint: #2b3527;
+    --clay: #d49b71;
+    --clay-tint: #3a2e25;
+    --alert: #dd8f7c;
+    --shadow: 0 1px 3px rgba(0, 0, 0, .3);
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg: #f4f6f2;
+    --paper: #ffffff;
+    --ink: #23291f;
+    --ink-soft: #6a7364;
+    --line: #dfe5d9;
+    --sage: #7d9a72;
+    --sage-deep: #57744c;
+    --sage-tint: #e9f0e6;
+    --clay: #a86a3d;
+    --clay-tint: #f7ebe1;
+    --alert: #b5563f;
+    --shadow: 0 1px 3px rgba(35, 41, 31, .07), 0 4px 14px rgba(35, 41, 31, .05);
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: var(--step-0);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 39rem;
+    margin: 0 auto;
+    padding: 0 1.25rem 6rem;
+  }
+
+  /* ---- masthead ---- */
+  .masthead {
+    position: relative;
+    overflow: hidden;
+    margin: 0 -1.25rem 2.5rem;
+    padding: 4rem 1.25rem 2.75rem;
+    background:
+      radial-gradient(120% 90% at 80% 0%, var(--sage-tint), transparent 60%),
+      linear-gradient(180deg, var(--sage-tint) 0%, var(--bg) 100%);
+    border-bottom: 1px solid var(--line);
+  }
+  .masthead > * { position: relative; z-index: 1; }
+  .masthead h1 {
+    font-family: var(--display);
+    font-size: var(--step-4);
+    line-height: 1.05;
+    font-weight: 400;
+    margin: 0 0 .6rem;
+    text-wrap: balance;
+    letter-spacing: -0.015em;
+  }
+  .masthead p {
+    margin: 0;
+    max-width: 30rem;
+    color: var(--ink-soft);
+    font-size: var(--step-1);
+  }
+  .eyebrow {
+    font-size: .78rem;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--sage-deep);
+    font-weight: 600;
+    margin: 0 0 1rem;
+  }
+
+  /* Four fireflies, barely there. They are the one thing in this app she
+     reacted to out loud, so the manual gets a couple. */
+  .firefly {
+    position: absolute;
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: #f0c860;
+    box-shadow: 0 0 9px 3px rgba(240, 200, 96, .55), 0 0 22px 8px rgba(240, 200, 96, .22);
+    opacity: 0;
+    z-index: 0;
+    animation: drift 14s ease-in-out infinite;
+  }
+  .firefly:nth-child(1) { left: 12%; top: 62%; animation-delay: 0s; }
+  .firefly:nth-child(2) { left: 68%; top: 28%; animation-delay: 3.5s; }
+  .firefly:nth-child(3) { left: 84%; top: 70%; animation-delay: 7s; }
+  .firefly:nth-child(4) { left: 40%; top: 20%; animation-delay: 10.5s; }
+  @keyframes drift {
+    0%, 100% { opacity: 0; transform: translate(0, 0); }
+    18%      { opacity: .85; }
+    50%      { opacity: .35; transform: translate(18px, -22px); }
+    82%      { opacity: .7; }
+    99%      { opacity: 0; transform: translate(34px, -44px); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .firefly { animation: none; opacity: .5; }
+  }
+
+  /* ---- contents ---- */
+  .contents {
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 1.25rem 1.25rem 1.4rem;
+    box-shadow: var(--shadow);
+    margin-bottom: 3rem;
+  }
+  .contents h2 {
+    font-family: var(--body);
+    font-size: .78rem;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    font-weight: 600;
+    margin: 0 0 .9rem;
+  }
+  .contents ol {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: .1rem;
+  }
+  .contents a {
+    display: flex;
+    gap: .7rem;
+    align-items: baseline;
+    padding: .42rem .3rem;
+    border-radius: 9px;
+    color: var(--ink);
+    text-decoration: none;
+    font-size: var(--step-0);
+  }
+  .contents a:hover, .contents a:focus-visible { background: var(--sage-tint); }
+  .contents .n {
+    color: var(--sage-deep);
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    min-width: 1.3rem;
+  }
+
+  /* ---- sections ---- */
+  section { margin-bottom: 3.25rem; scroll-margin-top: 1.5rem; }
+  section > h2 {
+    font-family: var(--display);
+    font-weight: 400;
+    font-size: var(--step-3);
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+    margin: 0 0 .35rem;
+    text-wrap: balance;
+  }
+  .lede {
+    color: var(--ink-soft);
+    font-size: var(--step-1);
+    margin: 0 0 1.6rem;
+    max-width: 32rem;
+  }
+  h3 {
+    font-family: var(--body);
+    font-size: var(--step-1);
+    font-weight: 650;
+    margin: 2rem 0 .5rem;
+    letter-spacing: -0.005em;
+  }
+  p { margin: 0 0 1rem; max-width: 34rem; }
+  p:last-child { margin-bottom: 0; }
+  strong { font-weight: 650; }
+
+  ul.plain { margin: 0 0 1.2rem; padding: 0; list-style: none; display: grid; gap: .85rem; }
+  ul.plain > li { display: grid; grid-template-columns: auto 1fr; gap: .75rem; align-items: start; }
+  ul.plain .icon {
+    font-size: 1.35rem;
+    line-height: 1.35;
+    width: 2.4rem;
+    height: 2.4rem;
+    display: grid;
+    place-items: center;
+    background: var(--sage-tint);
+    border-radius: 12px;
+  }
+  ul.plain .what { margin: 0; }
+  ul.plain .what b { display: block; font-weight: 650; }
+  ul.plain .what span { color: var(--ink-soft); }
+
+  /* A reference to something she taps, drawn to look like the button itself. */
+  .tap {
+    display: inline-block;
+    background: var(--sage-deep);
+    color: #fff;
+    border-radius: 999px;
+    padding: .1em .7em .16em;
+    font-size: .92em;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .tap.quiet {
+    background: transparent;
+    color: var(--sage-deep);
+    border: 1.5px solid var(--sage);
+  }
+  .tap.warn { background: transparent; color: var(--alert); border: 1.5px solid var(--alert); }
+
+  .steps { counter-reset: step; margin: 0 0 1.2rem; padding: 0; list-style: none; display: grid; gap: .7rem; }
+  .steps > li {
+    counter-increment: step;
+    display: grid;
+    grid-template-columns: 1.9rem minmax(0, 1fr);
+    gap: .7rem;
+    align-items: start;
+  }
+  /* One wrapper per step: without it every <span class="tap"> would become its
+     own grid cell and land on top of the counters. */
+  .steps .txt { min-width: 0; }
+  .steps > li::before {
+    content: counter(step);
+    font-variant-numeric: tabular-nums;
+    font-weight: 650;
+    color: var(--sage-deep);
+    background: var(--sage-tint);
+    border-radius: 50%;
+    width: 1.9rem; height: 1.9rem;
+    display: grid; place-items: center;
+    font-size: .92rem;
+  }
+
+  .note {
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--sage);
+    border-radius: 12px;
+    padding: 1rem 1.1rem;
+    margin: 1.4rem 0;
+    box-shadow: var(--shadow);
+  }
+  .note.careful { border-left-color: var(--clay); background: var(--clay-tint); }
+  .note p { margin-bottom: .6rem; }
+  .note p:last-child { margin-bottom: 0; }
+  .note b.head { display: block; margin-bottom: .3rem; font-weight: 650; }
+
+  .rule { border: 0; border-top: 1px solid var(--line); margin: 0 0 3rem; }
+
+  footer {
+    border-top: 1px solid var(--line);
+    padding-top: 1.5rem;
+    color: var(--ink-soft);
+    font-size: .95rem;
+  }
+  footer p { max-width: 34rem; }
+
+  a { color: var(--sage-deep); }
+  :focus-visible { outline: 2px solid var(--sage-deep); outline-offset: 3px; border-radius: 4px; }
+
+  @media (max-width: 30rem) {
+    :root { --step-3: 1.65rem; --step-4: 2.1rem; }
+    .masthead { padding-top: 3rem; }
+  }
+
+  @media print {
+    .firefly, .contents { display: none; }
+    body { background: #fff; color: #000; font-size: 11pt; }
+    .masthead { background: none; padding-top: 0; margin-bottom: 1.5rem; }
+    section { break-inside: avoid-page; margin-bottom: 1.6rem; }
+    .note { break-inside: avoid; box-shadow: none; }
+    .tap { border: 1px solid #000; background: none; color: #000; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <span class="firefly"></span><span class="firefly"></span>
+    <span class="firefly"></span><span class="firefly"></span>
+    <p class="eyebrow">Sage · a handbook</p>
+    <h1>How Sage works</h1>
+    <p>Everything in the app, in the order you'll meet it. Nothing here has to be read straight through — find the part you need and ignore the rest.</p>
+  </header>
+
+  <nav class="contents" aria-label="Contents">
+    <h2>What's in here</h2>
+    <ol>
+      <li><a href="#bar"><span class="n">1</span> The five buttons at the bottom</a></li>
+      <li><a href="#tell"><span class="n">2</span> Telling Sage things</a></li>
+      <li><a href="#now"><span class="n">3</span> Now, Today and Week</a></li>
+      <li><a href="#more"><span class="n">4</span> Everything behind More</a></li>
+      <li><a href="#lists"><span class="n">5</span> Your own lists</a></li>
+      <li><a href="#renewals"><span class="n">6</span> Subscriptions and things that come back</a></li>
+      <li><a href="#calendar"><span class="n">7</span> Your calendar, both directions</a></li>
+      <li><a href="#undo"><span class="n">8</span> Changing your mind</a></li>
+      <li><a href="#settings"><span class="n">9</span> Making it yours</a></li>
+      <li><a href="#private"><span class="n">10</span> What Sage will never keep</a></li>
+      <li><a href="#wrong"><span class="n">11</span> When something looks wrong</a></li>
+    </ol>
+  </nav>
+
+  <section id="bar">
+    <h2>The five buttons at the bottom</h2>
+    <p class="lede">These never move. Whatever else is on the screen, this row is how you get anywhere.</p>
+    <ul class="plain">
+      <li><span class="icon" aria-hidden="true">🌿</span><p class="what"><b>Now</b><span>Your home screen. The time, the weather, and only what's immediate.</span></p></li>
+      <li><span class="icon" aria-hidden="true">📋</span><p class="what"><b>Today</b><span>The whole day — appointments, what's due, your routines.</span></p></li>
+      <li><span class="icon" aria-hidden="true" style="background: var(--sage-deep); color: #fff; font-size: .78rem; font-weight: 650; line-height: 1.05;">Tell<br>Sage</span><p class="what"><b>Tell Sage</b><span>The big green circle. Anything you want to say goes in here.</span></p></li>
+      <li><span class="icon" aria-hidden="true">🗓️</span><p class="what"><b>Week</b><span>The next seven days at a glance.</span></p></li>
+      <li><span class="icon" aria-hidden="true">⋯</span><p class="what"><b>More</b><span>Every other room — lists, notes, the lake, settings.</span></p></li>
+    </ul>
+  </section>
+
+  <hr class="rule">
+
+  <section id="tell">
+    <h2>Telling Sage things</h2>
+    <p class="lede">This is the main thing you do. Say it however it comes out — Sage works out what it was.</p>
+    <ol class="steps">
+      <li><span class="txt">Tap the green <span class="tap">Tell Sage</span> circle.</span></li>
+      <li><span class="txt">Type it, or tap <span class="tap quiet">🎤 Talk</span> and say it out loud.</span></li>
+      <li><span class="txt">Tap <span class="tap">Sort it out</span>.</span></li>
+      <li><span class="txt">Sage shows you what it thinks you meant. Tick the ones that are right, fix any wording, then save.</span></li>
+    </ol>
+    <p>You can put several things in at once. <em>"We're going to the lake Friday. I paid Terminix. Remind me to call about the water heater."</em> — all three at the same time is fine.</p>
+    <div class="note">
+      <b class="head">Nothing is saved until you say so</b>
+      <p>Sage never files anything on its own. It proposes, you approve. If a suggestion is wrong, untick it and it's gone.</p>
+    </div>
+    <h3>If Sage gets something wrong</h3>
+    <p>Tap the item, and in the box that says <strong>"Say what's wrong with it"</strong> just tell it — <em>"that isn't urgent, leave it until September."</em> You don't have to hunt for the right field.</p>
+  </section>
+
+  <hr class="rule">
+
+  <section id="now">
+    <h2>Now, Today and Week</h2>
+    <p class="lede">Three views of the same life, at three distances.</p>
+    <h3>🌿 Now</h3>
+    <p>Built to fit one screen. The time and date, a greeting, today's weather, anything happening imminently, and your routine for this part of the day rolled up to a single line — tap it to open it in place.</p>
+    <p>First thing in the morning it shows a quieter screen with fireflies. It settles into the ordinary Now screen later on.</p>
+    <h3>📋 Today</h3>
+    <p>The full day: appointments from your calendar, what's due, what's overdue, and all your routines. If something is waiting on something else, Sage says so instead of nagging you about it.</p>
+    <h3>🗓️ Week</h3>
+    <p>The next seven days. Useful on a Sunday evening, or when someone asks if you're free Thursday.</p>
+  </section>
+
+  <hr class="rule">
+
+  <section id="more">
+    <h2>Everything behind More</h2>
+    <p class="lede">Tap <span class="tap quiet">⋯ More</span> and you get a grid of rooms. You will not need most of them most days.</p>
+    <ul class="plain">
+      <li><span class="icon" aria-hidden="true">🔎</span><p class="what"><b>Search Sage</b><span>Everything at once — tasks, notes, appointments, supplies, file names.</span></p></li>
+      <li><span class="icon" aria-hidden="true">💭</span><p class="what"><b>Thinking</b><span>Somewhere to talk something through. Includes a <strong>bedtime brain dump</strong>: say it all, get no advice back, and it's held until morning.</span></p></li>
+      <li><span class="icon" aria-hidden="true">🧠</span><p class="what"><b>What Sage knows</b><span>Everything Sage is remembering about you. You can delete any of it.</span></p></li>
+      <li><span class="icon" aria-hidden="true">🔭</span><p class="what"><b>Coming up</b><span>Further out — this month, the next few months, later this year.</span></p></li>
+      <li><span class="icon" aria-hidden="true">🌱</span><p class="what"><b>Opportunities</b><span>Things worth doing if you have the time and the weather, never things you owe.</span></p></li>
+      <li><span class="icon" aria-hidden="true">🎯</span><p class="what"><b>Projects</b><span>Bigger things, with what "done" looks like and one next action.</span></p></li>
+      <li><span class="icon" aria-hidden="true">🏞️</span><p class="what"><b>The lake</b><span>The next trip, the weather there now, and what still needs packing.</span></p></li>
+      <li><span class="icon" aria-hidden="true">📋</span><p class="what"><b>Routines</b><span>Your morning and evening rounds, and when each one applies.</span></p></li>
+      <li><span class="icon" aria-hidden="true">🗒️</span><p class="what"><b>My lists</b><span>Costco, packing, anything that piles up. See below.</span></p></li>
+      <li><span class="icon" aria-hidden="true">🛒</span><p class="what"><b>Shopping</b><span>What to buy, and what to wait for a sale on.</span></p></li>
+      <li><span class="icon" aria-hidden="true">📝</span><p class="what"><b>Notes</b><span>Things worth keeping that aren't tasks pretending to need a checkbox.</span></p></li>
+      <li><span class="icon" aria-hidden="true">📁</span><p class="what"><b>Files</b><span>Photos and documents you've handed to Sage.</span></p></li>
+      <li><span class="icon" aria-hidden="true">📥</span><p class="what"><b>Recent captures</b><span>The last things you told Sage, in case one went astray.</span></p></li>
+      <li><span class="icon" aria-hidden="true">⚙️</span><p class="what"><b>Settings</b><span>Text size, dark mode, calendars, how Sage talks to you.</span></p></li>
+    </ul>
+  </section>
+
+  <hr class="rule">
+
+  <section id="lists">
+    <h2>Your own lists</h2>
+    <p class="lede">A list is somewhere to put things. Nothing on one will ever chase you.</p>
+    <ol class="steps">
+      <li><span class="txt"><span class="tap quiet">⋯ More</span> → <span class="tap quiet">🗒️ My lists</span></span></li>
+      <li><span class="txt">Tap <span class="tap">＋ New list</span> and give it a name — Costco, packing for the lake, things to ask David.</span></li>
+      <li><span class="txt">Tap the list to open it, type into the box at the bottom, tap <span class="tap">Add</span>.</span></li>
+      <li><span class="txt">Tap the circle beside anything to tick it off. It leaves the list but stays shown underneath for a while, in case you tapped the wrong one.</span></li>
+    </ol>
+    <div class="note">
+      <b class="head">Lists stay out of your way on purpose</b>
+      <p>Paper towels on the Costco list will never appear on your Now or Today screen. It's a list, not a demand.</p>
+      <p>If you <em>do</em> want one to come forward on a particular day, open it and give it a date. Then it behaves like anything else.</p>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <section id="renewals">
+    <h2>Subscriptions and things that come back</h2>
+    <p class="lede">Your Subscriptions list from your phone is already in here, under Projects → <strong>Subscriptions &amp; renewals</strong>.</p>
+    <p>All ten are there with their dates, and each one shows up in <strong>Coming up</strong> when it gets close. AARP, Norton, Frndly, the fishing licence, the roach spray, Dermalogica, Rollo's birthday, Paramount+, HBO Max and Terminix.</p>
+    <h3>They come back round</h3>
+    <p>These aren't jobs you finish once. When you tick one off, Sage moves it to its next date instead of closing it. Tick AARP in September and it's sitting there again next September.</p>
+    <p>To change how often something repeats — or to stop it — open the item and look for <strong>"Comes back round"</strong>. Every week, every month, every 3 months, every year, or not at all.</p>
+    <div class="note careful">
+      <b class="head">Two things worth knowing</b>
+      <p><strong>Your fishing licence expired on 4 July.</strong> It came across from your list that way. Worth sorting before the next trip to the lake.</p>
+      <p><strong>Account numbers weren't copied over.</strong> The AARP membership number and the Terminix account number stayed in your Reminders app, where they already were. Sage doesn't keep numbers like that.</p>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <section id="calendar">
+    <h2>Your calendar, both directions</h2>
+    <p class="lede">Two separate things, easy to mix up. Both live in <span class="tap quiet">⚙️ Settings</span>.</p>
+    <h3>Your calendar → Sage</h3>
+    <p>Sage <strong>reads</strong> your iCloud calendar. It never adds, changes or deletes anything there. Appointments show up in Today and Week, and a PT appointment automatically switches off your home PT rounds for that day.</p>
+    <p>If something looks stale, tap <span class="tap">🔄 Check for changes now</span> at the top of that section.</p>
+    <h3>Sage → your calendar</h3>
+    <p>The other direction puts Sage's dates onto your real calendar, with proper alerts on your phone and watch. Subscribe once and new dates arrive on their own.</p>
+    <p>It sends <strong>appointments only</strong>. If you ever want your to-do items on there too, there's a switch for it — but your calendar stays a calendar by default.</p>
+    <div class="note careful">
+      <b class="head">About your Reminders lists</b>
+      <p>iCloud won't share your Reminders lists with any app outside Apple's own. That's Apple's decision, not a fault in Sage — which is why the two it does show have a ⚠️ in their names. Apple put that there.</p>
+      <p>So: your eleven lists stay in the Reminders app and work exactly as they always have. Anything you want Sage to know about, tell Sage directly, or keep it in <strong>My lists</strong>.</p>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <section id="undo">
+    <h2>Changing your mind</h2>
+    <p class="lede">Nothing in Sage is a one-way door.</p>
+    <p>Tick something by mistake? Tap it again. If it was a renewal that moved to next year, use <strong>undo</strong> and it goes back to the date it was on — you don't lose the year.</p>
+    <p>Anything Sage did on its own is listed with an undo button beside it. If you'd rather something simply weren't there, open it and tap <span class="tap warn">Delete</span>.</p>
+  </section>
+
+  <hr class="rule">
+
+  <section id="settings">
+    <h2>Making it yours</h2>
+    <p class="lede">All in <span class="tap quiet">⚙️ Settings</span>, near the top.</p>
+    <ul class="plain">
+      <li><span class="icon" aria-hidden="true">🔠</span><p class="what"><b>Text size</b><span>Normal, Large, Largest. Large is where it starts.</span></p></li>
+      <li><span class="icon" aria-hidden="true">🌙</span><p class="what"><b>Appearance</b><span>Light or dark.</span></p></li>
+      <li><span class="icon" aria-hidden="true">🗣️</span><p class="what"><b>How Sage talks to you</b><span>Say it in your own words — blunter, warmer, shorter, stop doing that thing. Your wording wins.</span></p></li>
+      <li><span class="icon" aria-hidden="true">🤖</span><p class="what"><b>ChatGPT</b><span>Lets your Sage in ChatGPT look at what's going on here. It can only ever read, never change anything.</span></p></li>
+      <li><span class="icon" aria-hidden="true">⬇️</span><p class="what"><b>Export everything</b><span>Your whole life in Sage, as one file. It's yours.</span></p></li>
+    </ul>
+    <p>You'll stay signed in — you shouldn't have to log in to your own morning.</p>
+  </section>
+
+  <hr class="rule">
+
+  <section id="private">
+    <h2>What Sage will never keep</h2>
+    <p class="lede">Decided at the start, and it hasn't moved.</p>
+    <p>No passwords, no security answers, no account or card numbers, no medical detail, no wills or estate documents. Sage will happily remind you to <em>update the beneficiary</em> — it just won't hold the account it belongs to.</p>
+    <p>Anything you'd rather the thinking part never saw: open the item and tick <strong>"Private from AI"</strong>. Sage keeps it, and never sends it anywhere.</p>
+  </section>
+
+  <hr class="rule">
+
+  <section id="wrong">
+    <h2>When something looks wrong</h2>
+    <p class="lede">In order, cheapest first.</p>
+    <ol class="steps">
+      <li><span class="txt">If an appointment is missing: <span class="tap">🔄 Check for changes now</span> in Settings.</span></li>
+      <li><span class="txt">If a calendar or list looks empty, look underneath its name — Sage says what actually arrived, or what went wrong, in plain words.</span></li>
+      <li><span class="txt">For iCloud specifically, <span class="tap quiet">What did Apple send?</span> shows exactly what your account handed over. Tap <strong>Copy all of it</strong> and send that to Audrey.</span></li>
+      <li><span class="txt">Anything else: tell Audrey what you were doing and what you expected instead. That's genuinely all that's needed.</span></li>
+    </ol>
+    <div class="note">
+      <p>Every problem found in this app so far was found by someone using it and saying "that looks wrong." That's not a nuisance — it's the only way these things get fixed.</p>
+    </div>
+  </section>
+
+  <footer>
+    <p>Sage was built for Regena, to her own specification. It complements the things that already work rather than replacing them — your calendar stays your calendar, your Reminders stay your Reminders, and Sage holds the rest so it stops living in your head.</p>
+  </footer>
+
+</div>

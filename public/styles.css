@@ -213,6 +213,8 @@ input:focus, textarea:focus, select:focus { border-color: var(--sage); }
   box-shadow: var(--shadow); min-height: 92px;
 }
 .more-tile span { display: block; font-size: 1.8em; margin-bottom: 5px; }
+/* The handbook tile is a link rather than a button; make it sit level with the rest. */
+a.more-tile { display: block; text-decoration: none; }
 .listening { animation: pulse 1.4s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: .55; } }
 @media (prefers-reduced-motion: reduce) { .listening { animation: none; } }
