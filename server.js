@@ -343,6 +343,15 @@ const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '2mb' }));
+// Safari requires a real PNG for an iPhone home-screen icon. Keeping this
+// tiny asset inline also prevents it being missed by source-only deployments.
+const APPLE_TOUCH_ICON = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAALQAAAC0CAMAAAAKE/YAAAAAFVBMVEXo7+bn7uWju6KIqXlLc1Vpkmt9nIO6qi+OAAADpklEQVR42u3cjXajIBAFYMe/93/kCoigQQVkGOi595x2u5tN+jlBgUnTYUAQBEEQBEEQBEEQBEEQBEEQBEFEQlukDQXRzR4L0QO6UbUG3+LaRNMuVx/jlklFfaGPY/+0/fH0fNRHk/lstOeMZG8dmkOHxXsstCXzs3ivd3vo6T12YDfifi2zLfZsIy2OK7NJO+h487Q0g44bG2e1OVoX/6/u6yYK7QaIut87mo+dUuij1P5U844uj08y+2i/1NuEvy4mq578Lwcgi57cmLZeqz1nHYn4Jv7MSmvODdiDM6FzxvSi0ePynpEHnXP1WNTdIsgqE8tFJOM6vURV2at28bGdMSMmiHXI7iEkBsicid7VRQdI6iov2bypGU7HqPU0UbZZ1ZpB/b5z+YZeWRoRTzsuOy/nm/WwZjA/7MaHAuiRAe0V/Kfvcdz2wWzORUb45TB6RNtnoGd09pjmQ988cImrR/VK++j863R36KP7KoTOWnsM5ZdMVvbyH/JXeVxD4/5hj1aARa8ZZhY02blQfRc9HR7f5wc9Ju5cWE5CukXsr1/8oIliq73azVZZ8VvVRvuKzAlNsbvx/b4lt1pxz/NIAXRM34Ohy5QwNL1NgEO/dpgY0Clnk2aH0De9PNfoK4qObrfYTA7981iVpmhKJKtIo3PMh1oInWe26t/9XhV02jl4VQcqzU/OLrQoOrvQRh0a0/zo1KtdE+h8cxhdJaUrXSWlx3SVlL568IM/lVoIrdWlZ8RK8g9mMXTZVV49dfJ6ekxHl591Encuww362LnoNs56asUXfe1wf8iUPeIQRG97xDmU9djDl0Yn7cYD6O3e833MvZjaYdF9jzP6WWzdLGTrCZ+Vkz88z2h6J2s2X7V3lOrl7di9EXC+3aFpjSLr0c1wMqYclHW4DkhURskf83SVTjJLTkYeOjmC6nz0XPt1gCLoRaDGpoP0AT3zXvlu1d/QY+SzWTxf0EulPkNR9NxppWXydUx3hxabyTu7TqtQezMib6VF1nmXGbGPVZ55QfBY+Ceup0XfNeXQiTuXRtBb7SP3iGYTLAf30YPq9USQxd9Qd0GTt2tsVLwZL2jzry8dJlHwHdrc+tPLExdr1+nUo9MNrcb8AEcA3UZJn+LQjbzPFuiW0hnaIH20tChS3R9aX5BPw0PaE5vOxrQKDaEZsfF0iR6GGWiggZZP32hpyL9H/7vf9NZwgK7JlhZkqaUBCIIgCIIgCIIgCIIgCILI5g8TM1/HCnn1hgAAAABJRU5ErkJggg==',
+  'base64',
+);
+app.get('/apple-touch-icon.png', (req, res) => {
+  res.set({ 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' }).send(APPLE_TOUCH_ICON);
+});
 app.use(express.static(path.join(__dirname, 'public')));
 
 const COOKIE = 'sage_session';
