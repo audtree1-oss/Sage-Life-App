@@ -1241,6 +1241,8 @@ async function renderICloudBox() {
     <p class="quiet" style="margin:-6px 0 10px">Sage only <b>reads</b> your calendars — it never adds, changes or
     deletes anything. Appointments show up in Today and This Week, and a PT appointment switches off your home PT
     rounds by itself.</p>
+    ${s.connected ? `<div class="btn-row" style="margin-bottom:12px">
+      <button class="btn small" id="ic-sync">🔄 Check for changes now</button></div>` : ''}
     ${icloudCard}
     ${feedCards}
     <div class="card">
@@ -1248,8 +1250,7 @@ async function renderICloudBox() {
       <p class="quiet" style="margin:4px 0 10px">Paste the calendar's private iCal link. No Google account setup needed.</p>
       <button class="btn small" id="feed-add">Add a calendar link</button>
     </div>
-    ${s.connected ? `<div class="btn-row"><button class="btn quietbtn small" id="ic-sync">Check for changes now</button></div>
-      <p class="quiet" style="margin-top:8px">${s.event_count} appointment${s.event_count === 1 ? '' : 's'} · ${s.reminder_count || 0} open reminder${s.reminder_count === 1 ? '' : 's'} · last checked ${esc(when)}</p>` : ''}`;
+    ${s.connected ? `<p class="quiet" style="margin-top:8px">${s.event_count} appointment${s.event_count === 1 ? '' : 's'} · ${s.reminder_count || 0} open reminder${s.reminder_count === 1 ? '' : 's'} · last checked ${esc(when)}</p>` : ''}`;
 
   if ($('#ic-connect')) $('#ic-connect').onclick = openICloudConnect;
   if ($('#feed-add')) $('#feed-add').onclick = openFeedConnect;
@@ -1257,7 +1258,8 @@ async function renderICloudBox() {
     $('#ic-sync').disabled = true;
     $('#ic-sync').textContent = 'Checking…';
     const r = await api('/api/calendar/sync', { method: 'POST' });
-    toast(r.errors && r.errors.length ? r.errors[0] : `Up to date — ${r.events || 0} appointments and ${r.reminders || 0} reminders.`, 5000);
+    toast(r.errors && r.errors.length ? r.errors[0] : `Up to date — ${r.events || 0} appointments and ${r.reminders || 0} reminders.`,
+      r.errors && r.errors.length ? 9000 : 5000);
     renderICloudBox();
   };
   if ($('#ic-off')) $('#ic-off').onclick = async () => {
@@ -1349,7 +1351,10 @@ function openICloudConnect() {
     try {
       const r = await api('/api/calendar/connect', { method: 'POST', body: { apple_id, password } });
       closeModal();
-      toast(`Connected — ${r.events || 0} appointments came across.`);
+      // A connection that authenticates but brings nothing back is not a
+      // success, and shouldn't be announced as one.
+      toast(r.errors && r.errors.length ? r.errors[0] : `Connected — ${r.events || 0} appointments came across.`,
+        r.errors && r.errors.length ? 9000 : 4000);
       renderICloudBox();
     } catch (e) {
       toast(e.message, 6000);
