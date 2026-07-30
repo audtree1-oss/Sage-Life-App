@@ -888,6 +888,18 @@ VIEWS.settings = async function renderSettings() {
     <button class="btn danger small" id="sign-out-all" style="margin-top:10px">Sign out everywhere</button>
     <h2>🔐 Sign-in security</h2>
     <div id="security-box"><div class="card"><span class="quiet">Checking…</span></div></div>
+    <h2>🗣️ How Sage talks to you</h2>
+    <div class="card">
+      <p style="margin:0 0 8px;font-size:.88em">Say it in your own words and Sage will follow it — how blunt, how warm,
+      how short, what to stop doing. Your wording wins over mine.</p>
+      <textarea id="voice-text" style="min-height:110px" placeholder="e.g. Be blunter with me. Skip the reassurance. If I'm avoiding something, say so."></textarea>
+      <div class="btn-row" style="margin-top:8px">
+        <button class="btn small" id="voice-save">Save</button>
+        <button class="btn ghost small" id="voice-see">See the defaults</button>
+      </div>
+      <p class="quiet" style="font-size:.78em;margin:8px 0 0">This changes tone only. The rules that keep Sage honest — never
+      inventing that something's done, never nagging about things that aren't ready — stay put.</p>
+    </div>
     <h2>🧠 Thinking layer</h2>
     <div class="card" id="ai-status"><span class="quiet">${AI_ON ? 'Checking…' : 'No key set — capture still works, just more literally.'}</span></div>
     <div class="card">
@@ -928,6 +940,18 @@ VIEWS.settings = async function renderSettings() {
     toast('Calendar link reset. Subscribe again anywhere you still want it.');
     setView('settings');
   };
+  api('/api/voice').then(({ voice, defaults }) => {
+    if ($('#voice-text')) $('#voice-text').value = voice || '';
+    if ($('#voice-save')) $('#voice-save').onclick = async () => {
+      await api('/api/voice', { method: 'POST', body: { voice: $('#voice-text').value } });
+      toast($('#voice-text').value.trim() ? 'Saved — Sage will talk that way from now on.' : 'Back to how Sage was.');
+    };
+    if ($('#voice-see')) $('#voice-see').onclick = () => {
+      openModal(`<h2>🗣️ How Sage was told to talk</h2>
+        <p class="sub">Sage already works this way. What you write in Settings is added on top, and wins where it disagrees.</p>
+        <div class="card" style="white-space:pre-wrap;font-size:.85em">${esc(defaults)}</div>`);
+    };
+  }).catch(() => {});
   renderICloudBox();
   renderSecurityBox();
   if (AI_ON) api('/api/ai/status').then((s) => {

@@ -785,6 +785,36 @@ How you behave:
 - Tone: warm, intelligent, natural, occasionally funny. Never patronizing. The relationship matters, not only the information — a generic task-manager voice is not Sage.
 - Her goal is lower cognitive load and fewer forgotten commitments, not maximum productivity, and not a smaller life.`;
 
+// Her own words about how Sage should sound, editable from Settings without
+// touching code. They come last so they win where they disagree — this is her
+// assistant's voice, and she is the authority on it. The rules above that
+// keep Sage honest (never invent a completion, honour prerequisites) are
+// separate from tone and stay put.
+let VOICE_CACHE = null;
+function personaFor(uid) {
+  if (VOICE_CACHE === null) {
+    const row = db.prepare("SELECT value FROM preferences WHERE user_id = ? AND key = 'voice'").get(uid);
+    VOICE_CACHE = row ? String(row.value) : '';
+  }
+  return VOICE_CACHE.trim()
+    ? `${SAGE_PERSONA}\n\nHow Regena has asked you to talk to her — these are her words, and they take priority on anything about tone or style:\n${VOICE_CACHE.trim()}`
+    : SAGE_PERSONA;
+}
+
+app.get('/api/voice', (req, res) => {
+  const row = db.prepare("SELECT value FROM preferences WHERE user_id = ? AND key = 'voice'").get(req.user.id);
+  res.json({ voice: row ? row.value : '', defaults: SAGE_PERSONA });
+});
+
+app.post('/api/voice', (req, res) => {
+  const voice = String((req.body || {}).voice || '').slice(0, 4000);
+  db.prepare(`INSERT INTO preferences (user_id, key, value) VALUES (?, 'voice', ?)
+    ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value`).run(req.user.id, voice);
+  VOICE_CACHE = voice;
+  logHistory(req.user.id, 'voice', 0, 'updated', voice.slice(0, 80));
+  res.json({ ok: true });
+});
+
 let LAST_AI_ERROR = '';
 async function askAI(system, user, { maxTokens = 1200, json = false, tier = 'fast', history = [] } = {}) {
   if (!AI_API_KEY) return null;
@@ -1861,7 +1891,7 @@ app.post('/api/capture', async (req, res) => {
   let reply = '';
 
   const ai = await askAI(
-    SAGE_PERSONA + `
+    personaFor(uid) + `
 
 You convert one natural capture into structured proposals against Regena's existing data.
 Reply ONLY with JSON: {"reply": string, "proposals": [ ... ]}
@@ -1983,7 +2013,7 @@ app.post('/api/correct', async (req, res) => {
   }
   const ctx = await buildContext(uid);
   const ai = await askAI(
-    SAGE_PERSONA + `\n\nRegena is correcting how one stored item is classified. Reply ONLY with JSON: {"changes":{...},"reply":"one short sentence"}. Allowed change fields: title, type, status, importance, due_at, window_start, target_window, location, life_area, effort_min, project_id, purchase_rule, note. Today is ${ctx.date}. "Not until September" means window_start on the 1st of the next September and target_window "September" — not a due date. Only use a project_id from Existing projects; otherwise use 0.`,
+    personaFor(uid) + `\n\nRegena is correcting how one stored item is classified. Reply ONLY with JSON: {"changes":{...},"reply":"one short sentence"}. Allowed change fields: title, type, status, importance, due_at, window_start, target_window, location, life_area, effort_min, project_id, purchase_rule, note. Today is ${ctx.date}. "Not until September" means window_start on the 1st of the next September and target_window "September" — not a due date. Only use a project_id from Existing projects; otherwise use 0.`,
     `Item: ${JSON.stringify({ id: item.id, title: item.title, type: item.type, importance: item.importance, due_at: item.due_at, target_window: item.target_window, location: item.location, project_id: item.project_id })}\nExisting projects: ${JSON.stringify(db.prepare("SELECT id, title FROM items WHERE user_id = ? AND type = 'project' AND status = 'open' ORDER BY title").all(uid))}\nHer correction: "${text}"`,
     { maxTokens: 500, json: true },
   );
@@ -2031,7 +2061,7 @@ app.get('/api/ai/context', async (req, res) => {
 // automatically become obligation" is her own principle, and an assistant
 // that turns every musing into a to-do makes musing unsafe.
 // ---------------------------------------------------------------------------
-const THINKING_PERSONA = SAGE_PERSONA + `
+const THINKING_EXTRA = `
 
 Right now you are thinking WITH her, not managing anything.
 - This is conversation. Do not produce task lists, do not assign actions, and do not end every reply with a suggestion.
@@ -2041,13 +2071,16 @@ Right now you are thinking WITH her, not managing anything.
 - Two to six sentences unless she clearly wants more. She reads on a phone, in large text.
 - If something genuinely needs remembering, say so once, plainly, and leave it — she can ask you to keep it.`;
 
-const BEDTIME_PERSONA = SAGE_PERSONA + `
+const BEDTIME_EXTRA = `
 
 It is bedtime and she is emptying her head so she can sleep. This is a holding pen, not a planning session.
 - Acknowledge what she said in ONE short line. Confirm you have it.
 - No advice. No questions. No next steps. No lists. Nothing to decide.
 - Never suggest doing anything tonight.
 - Warmth is welcome; problem-solving is not. It will all still be there tomorrow, and you are holding it so she does not have to.`;
+
+const thinkingPersona = (uid) => personaFor(uid) + THINKING_EXTRA;
+const bedtimePersona = (uid) => personaFor(uid) + BEDTIME_EXTRA;
 
 // ---------------------------------------------------------------------------
 // MEMORY — the durable middle tier. Retrieved by relevance, like everything
@@ -2200,7 +2233,7 @@ app.post('/api/threads/:id/message', async (req, res) => {
     : selectContext(uid, ctx, { text, budget: 20, routines: await activeRoutines(uid, ctx.date, ctx) });
 
   let reply = await askAI(
-    bedtime ? BEDTIME_PERSONA : THINKING_PERSONA,
+    bedtime ? bedtimePersona(uid) : thinkingPersona(uid),
     bedtime ? text
       : `${earlier}${text}\n\n[Her life, for context only — do not turn this into a task list:]\n${JSON.stringify(selection)}`,
     { maxTokens: bedtime ? 120 : 700, tier: 'smart', history },
@@ -2255,7 +2288,7 @@ app.post('/api/threads/:id/harvest', async (req, res) => {
   const ctx = await buildContext(uid);
 
   const ai = await askAI(
-    SAGE_PERSONA + `
+    personaFor(uid) + `
 
 Read a conversation and pull out what is worth keeping. Reply ONLY with JSON: {"reply": string, "proposals": [...]}.
 Proposal shapes: {"kind":"item","confidence":"high"|"low","item":{...}} · {"kind":"complete","item_id":123,"why":""} · {"kind":"memory","confidence":"high"|"low","memory":{"content":"one plain sentence in the third person","kind":"fact|preference|decision|principle|person|place"}}
@@ -2289,7 +2322,7 @@ app.post('/api/ask', async (req, res) => {
   const ctx = await buildContext(uid);
   const routines = await activeRoutines(uid, ctx.date, ctx);
   const answer = await askAI(
-    SAGE_PERSONA + '\n\nAnswer from the state given. Be brief. Lead with actions if any. If the state does not contain the answer, say so plainly rather than guessing.',
+    personaFor(uid) + '\n\nAnswer from the state given. Be brief. Lead with actions if any. If the state does not contain the answer, say so plainly rather than guessing.',
     `Question: "${question}"\n\nWhat is relevant right now:\n${JSON.stringify(selectContext(uid, ctx, { text: question, budget: 30, routines }))}`,
     // The thinking-partner path always gets the better model. This is where
     // "do you think you're rationalizing here?" either lands or doesn't.
