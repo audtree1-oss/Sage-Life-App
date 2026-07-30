@@ -23,7 +23,18 @@ const SESSION_SECRET = process.env.SESSION_SECRET || 'sage-local-dev';
 // --- AI provider abstraction (spec §3, §17) -------------------------------
 // Paste a key and go. The provider is inferred from the key's shape, and the
 // model is chosen automatically per request — no configuration required.
-const AI_API_KEY = process.env.AI_API_KEY || process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || '';
+// Keys get pasted, and pasting picks things up: a trailing newline from the
+// copy, surrounding quotes, an accidental "Bearer ". None of it is visible in
+// a settings box, and every bit of it produces a 401 that reads as "your key
+// is wrong" when the key is perfectly fine. Clean it rather than let her hunt.
+function cleanKey(raw) {
+  return String(raw || '')
+    .trim()
+    .replace(/^Bearer\s+/i, '')
+    .replace(/^["'“‘]|["'”’]$/g, '')
+    .trim();
+}
+const AI_API_KEY = cleanKey(process.env.AI_API_KEY || process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY);
 
 function detectProvider(key) {
   if (/^sk-ant-/.test(key)) return 'anthropic';
@@ -848,8 +859,18 @@ async function askAI(system, user, { maxTokens = 1200, json = false, tier = 'fas
         const problem = await r.json();
         detail = problem?.error?.message || detail;
       } catch { /* keep the status-only explanation */ }
-      LAST_AI_ERROR = `${model}: ${detail}`;
-      console.error(`Sage AI call failed — ${LAST_AI_ERROR}`);
+      // Provider errors are written for developers. Translate the three that
+      // actually happen into something she can act on without reading a log.
+      let plain = '';
+      if (r.status === 401 || /invalid[_ ]api[_ ]key|incorrect api key/i.test(detail)) {
+        plain = 'The key was refused. Copy it again from the provider and paste it into Render → Environment → AI_API_KEY — make sure nothing extra came with it.';
+      } else if (r.status === 429 || /quota|insufficient|billing|credit/i.test(detail)) {
+        plain = 'The key works, but the account is out of credit. Add funds or a payment method in the provider’s billing page.';
+      } else if (r.status === 404 || /model/i.test(detail)) {
+        plain = `The model "${model}" was not available to this account. Sage will keep working; set AI_MODEL_FAST / AI_MODEL_SMART to pick different ones.`;
+      }
+      LAST_AI_ERROR = plain || `${model}: ${detail}`;
+      console.error(`Sage AI call failed — ${model}: ${detail}`);
       return null;
     }
     const data = await r.json();
