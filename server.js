@@ -2777,6 +2777,33 @@ app.post('/api/calendar/connect', async (req, res) => {
   }
 });
 
+// What Apple actually answered, for when the app and her own Reminders app
+// disagree about what exists. Only the collection listing — names, links and
+// what each one holds. No appointments, no reminder contents, no credential,
+// and the account number in the links is masked before it leaves the server.
+app.get('/api/calendar/diagnostics', async (req, res) => {
+  const creds = calCreds(req.user.id);
+  if (!creds || !creds.password) return res.status(400).json({ error: 'iCloud is not connected.' });
+  const mask = (s) => String(s).replace(/\/\d{5,}\//g, '/‹account›/');
+  try {
+    const probe = await caldav.probeHome(creds.acct.home_url, creds.acct.apple_id, creds.password);
+    res.json({
+      status: probe.status,
+      apple_id: creds.acct.apple_id,
+      home: mask(creds.acct.home_url),
+      responses: probe.considered.length,
+      considered: probe.considered.map((c) => ({ ...c, href: mask(c.href) })),
+      kept: probe.collections.map((c) => ({
+        name: c.name, href: mask(c.url),
+        holds: [c.supportsEvents ? 'appointments' : '', c.supportsTodos ? 'reminders' : ''].filter(Boolean).join(' + '),
+      })),
+      raw: mask(probe.raw).slice(0, 20000),
+    });
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
 app.get('/api/calendar/status', (req, res) => {
   const acct = db.prepare('SELECT apple_id, last_sync, last_error FROM cal_account WHERE user_id = ?').get(req.user.id);
   const cals = db.prepare('SELECT id, name, color, enabled, kind, last_error, url FROM cal_calendars WHERE user_id = ? ORDER BY kind, name').all(req.user.id);
