@@ -1551,6 +1551,9 @@ function openCapture() {
 
 function proposalCard(p, idx) {
   const checked = p.confidence !== 'low' ? 'checked' : '';
+  // An unticked box is Sage saying "I wasn't sure". Left silent, it reads as a
+  // preview she is waiting on rather than a choice she has to make.
+  const unsure = checked ? '' : '<div class="quiet" style="margin-top:6px;font-size:.85em">Sage wasn\u2019t sure about this one — tick the box to keep it.</div>';
   if (p.kind === 'item') {
     const i = p.item || {};
     return `
@@ -1568,6 +1571,7 @@ function proposalCard(p, idx) {
             </div>
             ${i.target_window ? `<div class="quiet" style="margin-top:5px">not until ${esc(i.target_window)}</div>` : ''}
             ${i.event_kind ? `<div class="quiet" style="margin-top:5px">${esc(i.event_kind)}</div>` : ''}
+            ${unsure}
           </div>
         </label>
       </div>`;
@@ -1615,16 +1619,34 @@ function proposalCard(p, idx) {
   return '';
 }
 
+window.renderProposals = renderProposals;
 function renderProposals(m, r) {
   if (!r.proposals.length) {
     $('#cap-out', m).innerHTML = `<div class="card">${esc(r.reply || 'I did not find anything to save in that.')}</div>`;
     return;
   }
+  // When Sage asks something, the answer is a tick — not more typing. Say so,
+  // because a question with a text box above it invites her to type into it.
+  const asked = /\?\s*$/.test(String(r.reply || '').trim());
   $('#cap-out', m).innerHTML = `
-    ${r.reply ? `<div class="card sage" style="margin-top:14px"><b>🌿</b> ${esc(r.reply)}</div>` : ''}
+    ${r.reply ? `<div class="card sage" style="margin-top:14px"><b>🌿</b> ${esc(r.reply)}
+      ${asked ? '<div class="quiet" style="margin-top:8px">You answer by ticking below — no need to type again. Change the date or wording first if you want.</div>' : ''}</div>` : ''}
     ${r.proposals.map(proposalCard).join('')}
     <button class="btn big" id="cap-save">Save the checked ones</button>
     ${r.source !== 'ai' ? '<p class="quiet center">Sorted with simple rules — the AI layer isn’t connected.</p>' : ''}`;
+
+  // The button reports what it is about to do, so "nothing is ticked" is
+  // visible before she taps rather than after.
+  const boxes = $$('[data-prop] input[type=checkbox]', m);
+  const refresh = () => {
+    const n = boxes.filter((b) => b.checked).length;
+    $('#cap-save', m).textContent = n === 0 ? 'Tick what you want to keep'
+      : n === 1 ? 'Save this one' : `Save these ${n}`;
+    $('#cap-save', m).classList.toggle('quietbtn', n === 0);
+  };
+  boxes.forEach((b) => b.addEventListener('change', refresh));
+  refresh();
+
   $('#cap-save', m).onclick = async () => {
     const chosen = [];
     for (const card of $$('[data-prop]', m)) {
@@ -1639,7 +1661,10 @@ function renderProposals(m, r) {
       }
       chosen.push(p);
     }
-    if (!chosen.length) { closeModal(); return toast('Nothing saved.'); }
+    if (!chosen.length) {
+      // Closing here would bin what she typed and look like Sage ignored her.
+      return toast('Tick the box beside anything you want to keep, then tap save.', 5000);
+    }
     const { applied } = await api('/api/capture/apply', { method: 'POST', body: { raw: r.raw, proposals: chosen } });
     closeModal();
     toast(applied.length === 1 ? 'Got it.' : `Got it — ${applied.length} things.`);
