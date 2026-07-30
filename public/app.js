@@ -43,7 +43,7 @@ const today = () => {
   return `${p.year}-${p.month}-${p.day}`;
 };
 
-const TYPES = { task: '✓ Task', event: '📅 Event', project: '🎯 Project', opportunity: '🌱 Opportunity', shopping: '🛒 Shopping', note: '📝 Note' };
+const TYPES = { task: '✓ Task', event: '📅 Event', project: '🎯 Project', opportunity: '🌱 Opportunity', shopping: '🛒 Shopping', note: '📝 Note', list: '🗒️ List' };
 const IMPORTANCE = { must: 'Must do', should: 'Should do', opportunity: 'Opportunity', someday: 'Someday' };
 // Things that come back round rather than being finished once.
 const REPEATS = { '': 'Does not repeat', weekly: 'Every week', monthly: 'Every month', quarterly: 'Every 3 months', yearly: 'Every year' };
@@ -580,6 +580,7 @@ VIEWS.more = function renderMore() {
       <button class="more-tile" data-go="projects"><span>🎯</span>Projects</button>
       <button class="more-tile" data-go="lake"><span>🏞️</span>The lake</button>
       <button class="more-tile" data-go="routines"><span>📋</span>Routines</button>
+      <button class="more-tile" data-go="lists"><span>🗒️</span>My lists</button>
       <button class="more-tile" data-go="shopping"><span>🛒</span>Shopping</button>
       <button class="more-tile" data-go="notes"><span>📝</span>Notes</button>
       <button class="more-tile" data-go="files"><span>📁</span>Files</button>
@@ -805,6 +806,92 @@ VIEWS.shopping = async function renderShopping() {
         <div class="meta">${v.state === 'out' ? '❗ out' : v.state === 'low' ? '⚠️ getting low' : 'stocked'}${v.store ? ' · ' + esc(v.store) : ''}${v.purchase_rule === 'on_sale' ? ' · wait for a sale' : ''}</div>
       </div></div>`).join('')}` : ''}
     <button class="btn ghost small" data-back style="margin-top:16px">← More</button>`;
+  wireItems($('#main'));
+  $('[data-back]').onclick = () => setView('more');
+};
+
+// MY LISTS — the Costco list, the packing list. Nothing here chases her: a list
+// is somewhere to put things, not somewhere to be nagged from.
+VIEWS.lists = async function renderLists() {
+  const d = await api('/api/views/lists');
+  const openId = VIEWS._openList && d.lists.some((l) => l.id === VIEWS._openList) ? VIEWS._openList : null;
+  $('#main').innerHTML = `
+    <h1>🗒️ My lists</h1>
+    <p class="sub">Somewhere to put things. Nothing on a list will chase you.</p>
+    <button class="btn small" id="list-new">＋ New list</button>
+    <div style="margin-top:12px">
+      ${d.lists.length ? d.lists.map((l) => `
+        <div class="card">
+          <div data-list-head="${l.id}" style="display:flex;align-items:center;gap:8px;cursor:pointer">
+            <b style="flex:1">${esc(l.title)}</b>
+            <span class="pill grey">${l.openCount ? `${l.openCount} on it` : 'empty'}</span>
+            <span aria-hidden="true">${l.id === openId ? '⌄' : '›'}</span>
+          </div>
+          ${l.id === openId ? `
+            <div style="margin-top:10px">
+              ${l.items.map((i) => `
+                <div class="row flat ${i.status === 'done' ? 'done' : ''}">
+                  <button class="tick" data-tick="${i.id}" aria-label="Check off"></button>
+                  <div class="body" data-open="${i.id}"><div class="title">${esc(i.title)}</div>
+                  ${i.note ? `<div class="meta">${esc(i.note)}</div>` : ''}</div>
+                </div>`).join('') || '<div class="quiet">Nothing on this one yet.</div>'}
+              <div class="btn-row" style="margin-top:10px">
+                <input type="text" data-list-add="${l.id}" placeholder="Add to ${esc(l.title)}" style="flex:1">
+                <button class="btn small" data-list-addgo="${l.id}">Add</button>
+              </div>
+              ${l.recentlyDone.length ? `<div class="quiet" style="margin-top:10px;font-size:.82em">
+                Recently ticked off: ${l.recentlyDone.map((r) => esc(r.title)).join(', ')}</div>` : ''}
+              <div class="btn-row" style="margin-top:10px">
+                <button class="btn ghost small" data-list-edit="${l.id}">Rename or delete this list</button>
+              </div>
+            </div>` : ''}
+        </div>`).join('') : '<div class="empty">No lists yet. Make one for the things that pile up — Costco, packing, the hardware store.</div>'}
+    </div>
+    <button class="btn ghost small" data-back style="margin-top:16px">← More</button>`;
+
+  $('#list-new').onclick = async () => {
+    const m = openModal(`
+      <h2>🗒️ New list</h2>
+      <p class="sub">A name is all it needs. Costco, packing for the lake, things to ask David.</p>
+      <label class="field">What is this list called?</label>
+      <input id="nl-title" placeholder="e.g. Costco">
+      <button class="btn big" id="nl-save" style="margin-top:16px">Make the list</button>`);
+    $('#nl-title', m).focus();
+    const save = async () => {
+      const title = $('#nl-title', m).value.trim();
+      if (!title) return toast('Give it a name first.');
+      const made = await api('/api/items', { method: 'POST', body: { title, type: 'list', source: 'typed' } });
+      VIEWS._openList = made.id;
+      closeModal(); toast(`“${title}” is ready.`); setView('lists');
+    };
+    $('#nl-save', m).onclick = save;
+    $('#nl-title', m).onkeydown = (e) => { if (e.key === 'Enter') save(); };
+  };
+
+  $$('[data-list-head]').forEach((h) => h.onclick = () => {
+    const id = +h.dataset.listHead;
+    VIEWS._openList = VIEWS._openList === id ? null : id;
+    setView('lists');
+  });
+
+  const addTo = async (id) => {
+    const box = $(`[data-list-add="${id}"]`);
+    const title = box.value.trim();
+    if (!title) return;
+    await api('/api/items', { method: 'POST', body: { title, type: 'task', project_id: id, source: 'typed' } });
+    VIEWS._openList = id;
+    setView('lists');
+  };
+  $$('[data-list-addgo]').forEach((b) => b.onclick = () => addTo(+b.dataset.listAddgo));
+  $$('[data-list-add]').forEach((box) => {
+    box.onkeydown = (e) => { if (e.key === 'Enter') addTo(+box.dataset.listAdd); };
+    box.focus();
+  });
+  $$('[data-list-edit]').forEach((b) => b.onclick = async () => {
+    const list = d.lists.find((l) => l.id === +b.dataset.listEdit);
+    if (list) openItem(list);
+  });
+
   wireItems($('#main'));
   $('[data-back]').onclick = () => setView('more');
 };
