@@ -469,6 +469,7 @@ VIEWS.more = function renderMore() {
     <div class="more-grid">
       <button class="more-tile" data-go="search"><span>🔎</span>Search Sage</button>
       <button class="more-tile" data-go="think"><span>💭</span>Thinking</button>
+      <button class="more-tile" data-go="memory"><span>🧠</span>What Sage knows</button>
       <button class="more-tile" data-go="coming"><span>🔭</span>Coming up</button>
       <button class="more-tile" data-go="opportunities"><span>🌱</span>Opportunities</button>
       <button class="more-tile" data-go="projects"><span>🎯</span>Projects</button>
@@ -1236,6 +1237,18 @@ function proposalCard(p, idx) {
         <div><b>Record ${esc(p.kindOf || 'weight')}:</b> ${esc(String(p.value))}</div>
       </label></div>`;
   }
+  if (p.kind === 'memory') {
+    const mem = p.memory || {};
+    return `<div class="card sky" data-prop="${idx}">
+      <label style="display:flex;gap:11px;align-items:flex-start">
+        <input type="checkbox" ${checked} style="margin-top:6px;transform:scale(1.35)">
+        <div style="flex:1">
+          <b>🧠 Remember this</b>
+          <input type="text" data-f="content" value="${esc(mem.content || '')}" style="margin-top:6px">
+          <div class="quiet" style="margin-top:4px">${esc(mem.kind || 'fact')} · kept until you delete it</div>
+        </div>
+      </label></div>`;
+  }
   if (p.kind === 'trip') {
     return `<div class="card clay" data-prop="${idx}">
       <label style="display:flex;gap:11px;align-items:center">
@@ -1264,6 +1277,9 @@ function renderProposals(m, r) {
       if (p.kind === 'item') {
         p.item = { ...p.item };
         for (const f of $$('[data-f]', card)) p.item[f.dataset.f] = f.value;
+      } else if (p.kind === 'memory') {
+        p.memory = { ...p.memory };
+        for (const f of $$('[data-f]', card)) p.memory[f.dataset.f] = f.value;
       }
       chosen.push(p);
     }
@@ -1408,6 +1424,84 @@ function openAsk() {
 }
 
 // ---------------------------------------------------------------------------
+// MEMORY — everything Sage has been told to remember, in plain sight.
+// Memory she can't read is memory she can't trust, so all of it is visible
+// and every line is editable or deletable.
+// ---------------------------------------------------------------------------
+// 📌 is reserved for "pinned" — a plain fact must not wear it.
+const MEM_KINDS = { fact: '🔹 Fact', preference: '💛 Preference', decision: '✔️ Decision',
+  principle: '🧭 Principle', person: '👤 Person', place: '📍 Place' };
+
+VIEWS.memory = async function renderMemory() {
+  const list = await api(`/api/memories?q=${encodeURIComponent(VIEWS._memQ || '')}`);
+  $('#main').innerHTML = `
+    <h1>🧠 What Sage knows</h1>
+    <p class="sub">Everything you've asked Sage to remember. Change or delete any of it — this is yours.</p>
+    <input type="text" id="mem-q" placeholder="🔍 Search what Sage knows…" value="${esc(VIEWS._memQ || '')}">
+    <button class="btn small" id="mem-add" style="margin-top:10px">＋ Tell Sage something to remember</button>
+    ${list.length ? list.map((m) => `
+      <div class="card" data-mem="${m.id}">
+        <div style="display:flex;gap:8px;align-items:flex-start">
+          <div style="flex:1">
+            <div>${esc(m.content)}</div>
+            <div class="quiet" style="margin-top:4px">${esc(MEM_KINDS[m.kind] || m.kind)}${m.pinned ? ' · 📌 always remembered' : ''}${m.source === 'thread' ? ' · from a conversation' : ''}</div>
+          </div>
+          <button class="btn ghost small" data-memedit="${m.id}">✎</button>
+        </div>
+      </div>`).join('')
+    : `<div class="empty">${VIEWS._memQ ? 'Nothing matches.' : 'Nothing yet. Say “remember that…” to Sage, or add something here.'}</div>`}
+    <button class="btn ghost small" data-back style="margin-top:16px">← More</button>`;
+
+  let deb;
+  $('#mem-q').addEventListener('input', () => {
+    clearTimeout(deb);
+    deb = setTimeout(() => { VIEWS._memQ = $('#mem-q').value; renderMemory(); }, 250);
+  });
+  $('#mem-add').onclick = () => openMemoryModal();
+  $$('[data-memedit]').forEach((b) => b.onclick = () => openMemoryModal(list.find((x) => x.id == b.dataset.memedit)));
+  $('[data-back]').onclick = () => setView('more');
+};
+
+function openMemoryModal(mem = null) {
+  const m = openModal(`
+    <h2>🧠 ${mem ? 'This memory' : 'Remember this'}</h2>
+    <p class="sub">${mem ? '' : 'Something true about your life that Sage should carry forward — not a task.'}</p>
+    <label class="field">What should Sage remember?</label>
+    <textarea id="mm-content" style="min-height:80px" placeholder="e.g. The silver tea set matters because it was David's mother's.">${esc(mem?.content || '')}</textarea>
+    <label class="field">What kind of thing is it?</label>
+    <select id="mm-kind">${Object.entries(MEM_KINDS).map(([v, l]) => `<option value="${v}" ${v === (mem?.kind || 'fact') ? 'selected' : ''}>${l}</option>`).join('')}</select>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;gap:10px">
+      <div><b style="font-size:.9em">Always remember this</b><br><span class="quiet" style="font-size:.8em">Carried into every conversation, not only the relevant ones.</span></div>
+      <button type="button" class="chip ${mem?.pinned ? 'on' : ''}" id="mm-pin">${mem?.pinned ? 'yes' : 'no'}</button>
+    </div>
+    <div class="btn-row" style="margin-top:18px">
+      <button class="btn" id="mm-save" style="flex:2">${mem ? 'Save' : 'Remember it'}</button>
+      ${mem ? '<button class="btn danger small" id="mm-del">Forget this</button>' : ''}
+    </div>`);
+  let pinned = !!mem?.pinned;
+  $('#mm-pin', m).onclick = () => {
+    pinned = !pinned;
+    $('#mm-pin', m).classList.toggle('on', pinned);
+    $('#mm-pin', m).textContent = pinned ? 'yes' : 'no';
+  };
+  $('#mm-save', m).onclick = async () => {
+    const content = $('#mm-content', m).value.trim();
+    if (!content) return toast('What should Sage remember?');
+    const body = { content, kind: $('#mm-kind', m).value, pinned };
+    await (mem ? api(`/api/memories/${mem.id}`, { method: 'PATCH', body })
+      : api('/api/memories', { method: 'POST', body }));
+    closeModal(); toast(mem ? 'Saved.' : 'Sage will remember that.');
+    if (VIEW === 'memory') VIEWS.memory();
+  };
+  if ($('#mm-del', m)) $('#mm-del', m).onclick = async () => {
+    if (!confirm('Forget this? Sage won’t bring it up again.')) return;
+    await api(`/api/memories/${mem.id}`, { method: 'DELETE' });
+    closeModal(); toast('Forgotten.');
+    if (VIEW === 'memory') VIEWS.memory();
+  };
+}
+
+// ---------------------------------------------------------------------------
 // THINKING — a place to muse, decide, or empty her head at bedtime.
 // Nothing said here becomes a task unless she asks for it.
 // ---------------------------------------------------------------------------
@@ -1531,6 +1625,9 @@ async function harvestThread(id) {
       if (p.kind === 'item') {
         p.item = { ...p.item };
         for (const f of $$('[data-f]', card)) p.item[f.dataset.f] = f.value;
+      } else if (p.kind === 'memory') {
+        p.memory = { ...p.memory };
+        for (const f of $$('[data-f]', card)) p.memory[f.dataset.f] = f.value;
       }
       chosen.push(p);
     }

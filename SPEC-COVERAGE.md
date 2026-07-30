@@ -184,6 +184,44 @@ for the whole picture and tell her she has nothing else on.
 Average: **9 of 51 items**. Inspectable at any time via `GET /api/ai/context`
 — retrieval you can check rather than trust.
 
+## Memory — the middle tier
+
+The spec (§24) describes three tiers, and the first build had two:
+
+> Structured facts belong in the database; **stable personal context and
+> collaborative decision principles belong in retrievable memory**; recent
+> conversation supplies immediate context.
+
+Tasks lived in the database and chat lived in threads, but nothing carried a
+decision from one conversation to the next. Start a new thread and Sage had
+forgotten everything she'd ever settled.
+
+`memories` is that tier: facts, preferences, decisions, principles, people
+and places — durable, deliberately **not** tasks and **not** chat.
+
+- **Nothing lands silently.** Sage proposes a memory the same way it proposes
+  a task — from a capture ("remember that…") or when she harvests a thread —
+  and she ticks it before it is kept.
+- **All of it is visible and editable** under *What Sage knows*, searchable,
+  with one-tap delete. Memory she cannot inspect is memory she cannot trust.
+- **Pinned memories** travel into every conversation. Her decision principle
+  lives there.
+- **Recall scales.** Under thirty memories the whole set travels, because
+  selecting is worse than not selecting at that size — word-matching cannot
+  connect "what should I wear" to "she avoids tanks", but the reasoning layer
+  can. Above thirty it falls back to relevance plus pinned, bounded at ten.
+- **Long threads keep a rolling gist**, summarised in the background past the
+  verbatim window, so a conversation doesn't forget its own beginning.
+
+**Bug found and fixed here:** usage count was added to the relevance score, so
+a memory recalled once scored above zero forever and came back on every
+unrelated query — "I paid Terminix" was dragging along the silver tea set.
+Usage now only breaks ties between things that already matched.
+
+Verified at both scales: with four memories all four travel; with forty, the
+tea-set query recalls the two tea-set memories plus the pinned principle,
+and "I paid Terminix" carries the pinned principle alone.
+
 ## Not in Sage, on purpose
 
 Per §22 and §18: no passwords or security answers, no account or financial
