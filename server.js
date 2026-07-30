@@ -98,6 +98,27 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   expires_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS passkeys (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  credential_id TEXT NOT NULL UNIQUE,
+  public_key BLOB NOT NULL,
+  counter INTEGER NOT NULL DEFAULT 0,
+  transports TEXT NOT NULL DEFAULT '[]',
+  device_type TEXT NOT NULL DEFAULT '',
+  backed_up INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_used TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS auth_challenges (
+  flow_id TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL DEFAULT 0,
+  challenge TEXT NOT NULL,
+  rp_id TEXT NOT NULL,
+  origin TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
 
 -- The universal capture record. Every kind of thing lives here with a type,
 -- so natural capture never has to decide "which form is this?" up front.
@@ -315,6 +336,7 @@ function ensureColumn(table, column, definition) {
 }
 ensureColumn('items', 'ai_private', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('sage_files', 'encrypted', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('users', 'recovery_hash', "TEXT NOT NULL DEFAULT ''");
 db.prepare("UPDATE sessions SET expires_at = datetime('now', '+30 days') WHERE expires_at > datetime('now', '+30 days')").run();
 
 const fileKey = crypto.scryptSync(String(SESSION_SECRET), 'sage-files-v1', 32);
@@ -464,11 +486,172 @@ function loginFailed(req) {
 }
 function loginSucceeded(req) { loginAttempts.delete(loginAttemptKey(req)); }
 
+function createSession(userId, res) {
+  const token = crypto.randomBytes(32).toString('hex');
+  db.prepare(`INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, datetime('now', '+${SESSION_DAYS} days'))`)
+    .run(token, userId);
+  setSessionCookie(res, token);
+}
+
+let webauthnLib;
+async function webauthn() {
+  webauthnLib ||= import('@simplewebauthn/server');
+  return webauthnLib;
+}
+function requestRP(req) {
+  return { rpID: req.hostname, origin: `${req.protocol}://${req.get('host')}` };
+}
+function saveChallenge({ userId = 0, challenge, rpID, origin, kind }) {
+  const flowId = crypto.randomBytes(24).toString('base64url');
+  db.prepare("DELETE FROM auth_challenges WHERE expires_at <= datetime('now')").run();
+  db.prepare(`INSERT INTO auth_challenges (flow_id, user_id, challenge, rp_id, origin, kind, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, datetime('now', '+5 minutes'))`)
+    .run(flowId, userId, challenge, rpID, origin, kind);
+  return flowId;
+}
+function takeChallenge(flowId, kind) {
+  const row = db.prepare(`SELECT * FROM auth_challenges
+    WHERE flow_id = ? AND kind = ? AND expires_at > datetime('now')`).get(String(flowId || ''), kind);
+  if (row) db.prepare('DELETE FROM auth_challenges WHERE flow_id = ?').run(row.flow_id);
+  return row;
+}
+
 app.get('/healthz', (req, res) => res.json({ ok: true }));
 
 app.get('/api/me', (req, res) => {
   const anyUser = db.prepare('SELECT COUNT(*) AS n FROM users').get().n > 0;
   res.json({ needsSetup: !anyUser, user: currentUser(req), ai: !!AI_API_KEY });
+});
+
+app.get('/api/passkey/available', (req, res) => {
+  res.json({ available: db.prepare('SELECT COUNT(*) AS n FROM passkeys').get().n > 0 });
+});
+
+app.post('/api/passkey/auth/options', async (req, res) => {
+  try {
+    const { generateAuthenticationOptions } = await webauthn();
+    const { rpID, origin } = requestRP(req);
+    const options = await generateAuthenticationOptions({ rpID, userVerification: 'required' });
+    const flow_id = saveChallenge({ challenge: options.challenge, rpID, origin, kind: 'authentication' });
+    res.json({ flow_id, options });
+  } catch {
+    res.status(500).json({ error: 'Face ID sign-in could not start.' });
+  }
+});
+
+app.post('/api/passkey/auth/verify', async (req, res) => {
+  const flow = takeChallenge((req.body || {}).flow_id, 'authentication');
+  const response = (req.body || {}).response;
+  if (!flow || !response?.id) return res.status(400).json({ error: 'That Face ID request expired. Try again.' });
+  const passkey = db.prepare('SELECT * FROM passkeys WHERE credential_id = ?').get(response.id);
+  if (!passkey) return res.status(401).json({ error: 'That passkey is not registered with Sage.' });
+  try {
+    const { verifyAuthenticationResponse } = await webauthn();
+    const verification = await verifyAuthenticationResponse({
+      response,
+      expectedChallenge: flow.challenge,
+      expectedOrigin: flow.origin,
+      expectedRPID: flow.rp_id,
+      requireUserVerification: true,
+      credential: {
+        id: passkey.credential_id,
+        publicKey: new Uint8Array(passkey.public_key),
+        counter: passkey.counter,
+        transports: safeJSON(passkey.transports, []),
+      },
+    });
+    if (!verification.verified) return res.status(401).json({ error: 'Face ID could not verify that passkey.' });
+    db.prepare("UPDATE passkeys SET counter = ?, last_used = datetime('now') WHERE id = ?")
+      .run(verification.authenticationInfo.newCounter, passkey.id);
+    createSession(passkey.user_id, res);
+    res.json({ ok: true });
+  } catch {
+    res.status(401).json({ error: 'Face ID verification failed. The password still works.' });
+  }
+});
+
+app.post('/api/passkey/register/options', async (req, res) => {
+  const user = currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Sign in with the password first.' });
+  try {
+    const { generateRegistrationOptions } = await webauthn();
+    const { rpID, origin } = requestRP(req);
+    const existing = db.prepare('SELECT * FROM passkeys WHERE user_id = ?').all(user.id);
+    const options = await generateRegistrationOptions({
+      rpName: 'Sage',
+      rpID,
+      userName: user.email,
+      userDisplayName: user.name,
+      attestationType: 'none',
+      excludeCredentials: existing.map((p) => ({
+        id: p.credential_id, transports: safeJSON(p.transports, []),
+      })),
+      authenticatorSelection: {
+        residentKey: 'required',
+        userVerification: 'required',
+        authenticatorAttachment: 'platform',
+      },
+      supportedAlgorithmIDs: [-7, -257],
+    });
+    const flow_id = saveChallenge({
+      userId: user.id, challenge: options.challenge, rpID, origin, kind: 'registration',
+    });
+    res.json({ flow_id, options });
+  } catch {
+    res.status(500).json({ error: 'Face ID setup could not start.' });
+  }
+});
+
+app.post('/api/passkey/register/verify', async (req, res) => {
+  const user = currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Sign in with the password first.' });
+  const flow = takeChallenge((req.body || {}).flow_id, 'registration');
+  if (!flow || flow.user_id !== user.id) return res.status(400).json({ error: 'That setup request expired. Try again.' });
+  try {
+    const { verifyRegistrationResponse } = await webauthn();
+    const verification = await verifyRegistrationResponse({
+      response: (req.body || {}).response,
+      expectedChallenge: flow.challenge,
+      expectedOrigin: flow.origin,
+      expectedRPID: flow.rp_id,
+      requireUserVerification: true,
+    });
+    if (!verification.verified || !verification.registrationInfo) {
+      return res.status(400).json({ error: 'Face ID registration was not verified.' });
+    }
+    const { credential, credentialDeviceType, credentialBackedUp } = verification.registrationInfo;
+    db.prepare(`INSERT INTO passkeys
+      (user_id, credential_id, public_key, counter, transports, device_type, backed_up)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(credential_id) DO UPDATE SET public_key = excluded.public_key,
+        counter = excluded.counter, transports = excluded.transports`)
+      .run(user.id, credential.id, Buffer.from(credential.publicKey), credential.counter,
+        JSON.stringify(credential.transports || []), credentialDeviceType, credentialBackedUp ? 1 : 0);
+    logHistory(user.id, 'security', 0, 'passkey added', 'Face ID / passkey');
+    res.json({ ok: true });
+  } catch {
+    res.status(400).json({ error: 'Face ID setup did not complete. The password is unchanged.' });
+  }
+});
+
+app.post('/api/recovery/reset', (req, res) => {
+  if (loginBlocked(req)) return res.status(429).json({ error: 'Too many attempts. Wait 15 minutes, then try again.' });
+  const email = String((req.body || {}).email || '').trim().toLowerCase();
+  const code = String((req.body || {}).code || '').replace(/[^A-Z0-9]/gi, '').toUpperCase();
+  const password = String((req.body || {}).password || '');
+  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+  if (!user || !user.recovery_hash || !bcrypt.compareSync(code, user.recovery_hash)) {
+    loginFailed(req);
+    return res.status(401).json({ error: 'That email and recovery code did not match.' });
+  }
+  if (password.length < 10) return res.status(400).json({ error: 'Use at least 10 characters for the new password.' });
+  loginSucceeded(req);
+  db.prepare("UPDATE users SET password_hash = ?, recovery_hash = '' WHERE id = ?")
+    .run(bcrypt.hashSync(password, 12), user.id);
+  db.prepare('DELETE FROM sessions WHERE user_id = ?').run(user.id);
+  createSession(user.id, res);
+  logHistory(user.id, 'security', 0, 'password recovered', '');
+  res.json({ ok: true });
 });
 
 // What the reasoning layer actually resolved to — shown in Settings, so a
@@ -1147,6 +1330,31 @@ app.post('/api/preferences', (req, res) => {
   const ins = db.prepare(`INSERT INTO preferences (user_id, key, value) VALUES (?, ?, ?)
     ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value`);
   for (const [k, v] of Object.entries(req.body || {})) ins.run(req.user.id, String(k), String(v));
+  res.json({ ok: true });
+});
+
+app.get('/api/security/status', (req, res) => {
+  const user = db.prepare("SELECT recovery_hash != '' AS has_recovery FROM users WHERE id = ?").get(req.user.id);
+  res.json({
+    passkeys: db.prepare('SELECT id, created_at, last_used, backed_up FROM passkeys WHERE user_id = ? ORDER BY id').all(req.user.id),
+    has_recovery: !!user?.has_recovery,
+    session_days: SESSION_DAYS,
+  });
+});
+
+app.post('/api/security/recovery-code', (req, res) => {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let raw = '';
+  for (let i = 0; i < 20; i++) raw += alphabet[crypto.randomInt(alphabet.length)];
+  const display = raw.match(/.{1,5}/g).join('-');
+  db.prepare('UPDATE users SET recovery_hash = ? WHERE id = ?').run(bcrypt.hashSync(raw, 12), req.user.id);
+  logHistory(req.user.id, 'security', 0, 'recovery code generated', '');
+  res.json({ code: display });
+});
+
+app.delete('/api/security/passkeys/:id', (req, res) => {
+  db.prepare('DELETE FROM passkeys WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
+  logHistory(req.user.id, 'security', 0, 'passkey removed', '');
   res.json({ ok: true });
 });
 
