@@ -522,7 +522,8 @@ VIEWS.notes = async function renderNotes() {
         <div class="card" data-note-open="${n.id}" style="cursor:pointer">
           <b>${esc(n.title)}</b>
           ${n.note ? `<div class="quiet" style="margin-top:5px;white-space:pre-wrap">${esc(n.note)}</div>` : ''}
-          <div style="margin-top:7px"><span class="pill grey">from ${esc(sourceLabel(n))}</span></div>
+          <div style="margin-top:7px"><span class="pill grey">from ${esc(sourceLabel(n))}</span>
+            ${n.ai_private ? '<span class="pill grey">🔒 private from AI</span>' : ''}</div>
         </div>`).join('') : '<div class="empty">No notes yet. A suspiciously clean desk.</div>'}
     </div>
     <button class="btn ghost small" data-back style="margin-top:16px">← More</button>`;
@@ -531,6 +532,10 @@ VIEWS.notes = async function renderNotes() {
       <h2>📝 New note</h2>
       <label class="field">Title</label><input id="note-title" placeholder="What is this about?">
       <label class="field">Note</label><textarea id="note-body" style="min-height:180px" placeholder="Put it here so it can stop living in your head."></textarea>
+      <label class="row flat" style="align-items:center;margin-top:12px;cursor:pointer">
+        <input type="checkbox" id="note-private" style="transform:scale(1.25)">
+        <div class="body"><b>Private from AI</b><div class="quiet">Sage stores it, but never sends it to OpenAI.</div></div>
+      </label>
       <button class="btn big" id="note-save" style="margin-top:16px">Save note</button>`);
     $('#note-save', m).onclick = async () => {
       const title = $('#note-title', m).value.trim();
@@ -538,7 +543,7 @@ VIEWS.notes = async function renderNotes() {
       if (!title && !note) return toast('Give me at least a little something to save.');
       await api('/api/items', { method: 'POST', body: {
         type: 'note', status: 'open', importance: 'should',
-        title: title || note.slice(0, 80), note, source: 'manual',
+        title: title || note.slice(0, 80), note, source: 'manual', ai_private: $('#note-private', m).checked,
       } });
       closeModal(); toast('Note saved.'); setView('notes');
     };
@@ -583,8 +588,9 @@ VIEWS.files = async function renderFiles() {
                 <span class="pill grey">${esc(f.original_name)}</span>
                 <span class="pill grey">${fileSize(f.size_bytes)}</span>
                 ${f.related_item_title ? `<span class="pill grey">linked to ${esc(f.related_item_title)}</span>` : ''}
-                <span class="pill grey">from file upload</span>
+                <span class="pill grey">encrypted file</span>
               </div>
+              ${f.access_count ? `<div class="quiet" style="margin-top:5px">Opened ${f.access_count} time${f.access_count === 1 ? '' : 's'} · last ${fmtDate(f.last_opened.slice(0, 10))}</div>` : ''}
             </div>
           </div>
           <div class="btn-row" style="margin-top:10px">
@@ -671,6 +677,7 @@ VIEWS.settings = async function renderSettings() {
       <p style="margin:0 0 10px;font-size:.88em">Put Sage's dates on your real calendar, with real alerts on your phone and watch. Subscribe once; new dates flow in on their own.</p>
       <div class="btn-row"><a class="btn small" id="cal-sub" href="#">Subscribe on this phone</a>
       <button class="btn ghost small" id="cal-copy">Copy the link</button></div>
+      <button class="btn danger small" id="cal-reset" style="margin-top:10px">Reset private calendar link</button>
     </div>
     <h2>📥 Your calendar → Sage</h2>
     <div id="icloud-box"><div class="card"><span class="quiet">Checking…</span></div></div>
@@ -682,6 +689,7 @@ VIEWS.settings = async function renderSettings() {
       <a class="btn ghost small" href="/api/export.json">⬇️ Export everything</a>
       <button class="btn danger small" id="sign-out">Sign out</button>
     </div>
+    <button class="btn danger small" id="sign-out-all" style="margin-top:10px">Sign out everywhere</button>
     <h2>🧠 Thinking layer</h2>
     <div class="card" id="ai-status"><span class="quiet">${AI_ON ? 'Checking…' : 'No key set — capture still works, just more literally.'}</span></div>
     <div class="card">
@@ -704,6 +712,10 @@ VIEWS.settings = async function renderSettings() {
     setView('settings');
   });
   $('#sign-out').onclick = async () => { await api('/api/logout', { method: 'POST' }); location.reload(); };
+  $('#sign-out-all').onclick = async () => {
+    if (!confirm('Sign out every phone and browser connected to Sage?')) return;
+    await api('/api/logout-all', { method: 'POST' }); location.reload();
+  };
   $('[data-back]').onclick = () => setView('more');
   api('/api/calendar-url').then(({ path }) => {
     $('#cal-sub').href = `webcal://${location.host}${path}`;
@@ -712,6 +724,12 @@ VIEWS.settings = async function renderSettings() {
       toast('Copied. Paste it into any calendar app.');
     };
   }).catch(() => {});
+  $('#cal-reset').onclick = async () => {
+    if (!confirm('Reset the calendar link? Any calendar already subscribed with the old link will stop updating.')) return;
+    await api('/api/calendar-url/reset', { method: 'POST' });
+    toast('Calendar link reset. Subscribe again anywhere you still want it.');
+    setView('settings');
+  };
   renderICloudBox();
   if (AI_ON) api('/api/ai/status').then((s) => {
     const el = $('#ai-status');
@@ -1031,13 +1049,17 @@ function openItem(i) {
     <h2>${esc(i.title)}</h2>
     ${i.raw_capture && i.raw_capture !== i.title ? `<p class="quiet">You said: “${esc(i.raw_capture)}”</p>` : ''}
     ${i.blockers?.length ? `<div class="card clay">Waiting on: ${i.blockers.map(esc).join(', ')}</div>` : ''}
-    <label class="field">Say what's wrong with it</label>
+    ${i.ai_private ? '' : `<label class="field">Say what's wrong with it</label>
     <div class="btn-row">
       <input type="text" id="it-fix" placeholder="e.g. that isn't urgent, leave it until September" style="flex:1">
       <button class="btn small" id="it-fixgo">Fix</button>
-    </div>
+    </div>`}
     <label class="field">Title</label><input type="text" id="it-title" value="${esc(i.title)}">
     <label class="field">Notes</label><textarea id="it-note" style="min-height:70px">${esc(i.note)}</textarea>
+    <label class="row flat" style="align-items:center;margin-top:10px;cursor:pointer">
+      <input type="checkbox" id="it-private" ${i.ai_private ? 'checked' : ''} style="transform:scale(1.25)">
+      <div class="body"><b>Private from AI</b><div class="quiet">Keep this in Sage, but never send it to OpenAI.</div></div>
+    </label>
     <div class="btn-row">
       <div style="flex:1"><label class="field">Kind</label>
         <select id="it-type">${Object.entries(TYPES).map(([v, l]) => `<option value="${v}" ${v === i.type ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
@@ -1057,7 +1079,7 @@ function openItem(i) {
     </div>
     <button class="btn danger small" id="it-del" style="margin-top:10px">Delete</button>`);
 
-  $('#it-fixgo', m).onclick = async () => {
+  if ($('#it-fixgo', m)) $('#it-fixgo', m).onclick = async () => {
     const text = $('#it-fix', m).value.trim();
     if (!text) return;
     try {
@@ -1070,6 +1092,7 @@ function openItem(i) {
       title: $('#it-title', m).value, note: $('#it-note', m).value,
       type: $('#it-type', m).value, importance: $('#it-imp', m).value,
       due_at: $('#it-due', m).value, window_start: $('#it-win', m).value,
+      ai_private: $('#it-private', m).checked,
     };
     if ($('#it-next', m)) { body.next_action = $('#it-next', m).value; body.outcome = $('#it-outcome', m).value; }
     await api(`/api/items/${i.id}`, { method: 'PATCH', body });
