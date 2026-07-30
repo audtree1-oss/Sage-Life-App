@@ -1750,8 +1750,12 @@ function selectContext(uid, ctx, { text = '', budget = 24, routines = [] } = {})
     activeTrip: ctx.activeTrip || undefined,
     upcomingTrip: ctx.upcomingTrip || undefined,
     relevantItems: [...chosen.values()],
-    projects: live.filter((i) => i.type === 'project' && (i.next_action || chosen.has(i.id)))
-      .slice(0, 10).map((p) => ({ id: p.id, title: p.title, next_action: p.next_action || undefined })),
+    // Project membership is structural, not merely a search result. Always
+    // expose the active project directory so a capture like "plant lavender"
+    // can be attached to Garden even when the project itself was not selected
+    // by lexical retrieval.
+    projects: live.filter((i) => i.type === 'project')
+      .slice(0, 30).map((p) => ({ id: p.id, title: p.title, next_action: p.next_action || undefined })),
     aboutHer: prefs,
     // Honesty about the slice: without this the reasoning layer will happily
     // conclude "you have nothing else on" from a partial view.
@@ -1794,6 +1798,7 @@ Rules:
 - A greeting containing a bare number like "150.0" is a weight entry.
 - Resolve relative dates ("Friday", "tomorrow") to real dates.
 - Something not to be done until a season goes in target_window + window_start, not due_at.
+- For every new task, compare it with the existing projects supplied in context. When one is a clear semantic home, use that exact project's id as project_id. Never invent a project id; use 0 when none clearly fits.
 - If a task depends on another open item, set prereq_ids.`,
     `Her capture: "${text}"\n\nWhat is relevant right now:\n${JSON.stringify(selectContext(uid, ctx, { text, routines: await activeRoutines(uid, ctx.date, ctx) }))}`,
     { maxTokens: 1600, json: true, tier: captureTier(text) },
@@ -1830,6 +1835,12 @@ app.post('/api/capture/apply', (req, res) => {
 
   for (const p of proposals) {
     if (p.kind === 'item' && p.item) {
+      const proposedProject = parseInt(p.item.project_id, 10) || 0;
+      const ownedProject = proposedProject
+        ? db.prepare("SELECT id FROM items WHERE id = ? AND user_id = ? AND type = 'project' AND status = 'open'")
+          .get(proposedProject, uid)
+        : null;
+      p.item.project_id = ownedProject ? ownedProject.id : 0;
       const it = cleanItem({ ...p.item, raw_capture: raw, source: b.source === 'voice' ? 'voice' : 'typed' });
       const cols = Object.keys(it);
       const info = db.prepare(`INSERT INTO items (user_id, ${cols.join(', ')}) VALUES (?, ${cols.map(() => '?').join(', ')})`)
@@ -1881,12 +1892,20 @@ app.post('/api/correct', async (req, res) => {
   }
   const ctx = await buildContext(uid);
   const ai = await askAI(
-    SAGE_PERSONA + `\n\nRegena is correcting how one stored item is classified. Reply ONLY with JSON: {"changes":{...},"reply":"one short sentence"}. Allowed change fields: title, type, status, importance, due_at, window_start, target_window, location, life_area, effort_min, purchase_rule, note. Today is ${ctx.date}. "Not until September" means window_start on the 1st of the next September and target_window "September" — not a due date.`,
-    `Item: ${JSON.stringify({ id: item.id, title: item.title, type: item.type, importance: item.importance, due_at: item.due_at, target_window: item.target_window, location: item.location })}\nHer correction: "${text}"`,
+    SAGE_PERSONA + `\n\nRegena is correcting how one stored item is classified. Reply ONLY with JSON: {"changes":{...},"reply":"one short sentence"}. Allowed change fields: title, type, status, importance, due_at, window_start, target_window, location, life_area, effort_min, project_id, purchase_rule, note. Today is ${ctx.date}. "Not until September" means window_start on the 1st of the next September and target_window "September" — not a due date. Only use a project_id from Existing projects; otherwise use 0.`,
+    `Item: ${JSON.stringify({ id: item.id, title: item.title, type: item.type, importance: item.importance, due_at: item.due_at, target_window: item.target_window, location: item.location, project_id: item.project_id })}\nExisting projects: ${JSON.stringify(db.prepare("SELECT id, title FROM items WHERE user_id = ? AND type = 'project' AND status = 'open' ORDER BY title").all(uid))}\nHer correction: "${text}"`,
     { maxTokens: 500, json: true },
   );
   const parsed = safeJSON(ai || '', null);
   if (!parsed || !parsed.changes) return res.status(422).json({ error: 'Could not read that correction — you can edit the fields directly.' });
+  if (parsed.changes.project_id !== undefined) {
+    const proposedProject = parseInt(parsed.changes.project_id, 10) || 0;
+    const ownedProject = proposedProject
+      ? db.prepare("SELECT id FROM items WHERE id = ? AND user_id = ? AND type = 'project' AND status = 'open'")
+        .get(proposedProject, uid)
+      : null;
+    parsed.changes.project_id = ownedProject ? ownedProject.id : 0;
+  }
   const it = cleanItem(parsed.changes, item);
   const cols = Object.keys(it);
   if (cols.length) {
