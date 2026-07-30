@@ -44,8 +44,12 @@ data and no business logic.
   *"I paid Terminix."* Sage classifies it against everything already stored,
   shows what it understood, and saves only what she approves. Obvious,
   low-risk updates come pre-checked; anything consequential does not.
+- **🕐 A home screen** — Now leads with the time and date, live, in Sage's own
+  timezone. Staying signed in is the point: the session slides forward every
+  time she opens the app, so it never logs her out from under her.
 - **✨ Fireflies** — eleven of them drift and blink behind the morning
-  greeting, each on its own rhythm so they never pulse together. Pure CSS, no
+  greeting and again after 7pm, when they'd really be out over the grass —
+  each each on its own rhythm so they never pulse together. Pure CSS, no
   timers, nothing to drain a phone that lives on a kitchen table. They vanish
   entirely for anyone who prefers reduced motion. A surprise from Audrey.
 - **The morning hour** — before 10am, Now opens with presence rather than

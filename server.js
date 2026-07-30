@@ -515,9 +515,25 @@ function currentUser(req) {
     SELECT u.id, u.name, u.email FROM sessions s JOIN users u ON u.id = s.user_id
     WHERE s.token = ? AND s.expires_at > datetime('now')`).get(token) || null;
 }
+// Sliding expiry. Sage lives on her home screen, so a fixed 30-day session
+// would sign her out roughly monthly for no security benefit — the phone's own
+// lock is what actually protects it. Using the app keeps her signed in. The
+// write only happens once the window has really moved, not on every request.
+function touchSession(token, res) {
+  const row = db.prepare('SELECT expires_at FROM sessions WHERE token = ?').get(token);
+  if (!row) return;
+  const expiresAt = new Date(String(row.expires_at).replace(' ', 'T') + 'Z');
+  const daysLeft = (expiresAt - Date.now()) / 86400000;
+  if (daysLeft > SESSION_DAYS - 1) return;
+  db.prepare(`UPDATE sessions SET expires_at = datetime('now', '+${SESSION_DAYS} days') WHERE token = ?`).run(token);
+  setSessionCookie(res, token);
+}
+
 function requireAuth(req, res, next) {
   const user = currentUser(req);
   if (!user) return res.status(401).json({ error: 'Not logged in.' });
+  const token = parseCookies(req)[COOKIE];
+  if (token) { try { touchSession(token, res); } catch {} }
   req.user = user;
   next();
 }
@@ -1571,7 +1587,8 @@ app.get('/api/views/now', async (req, res) => {
   const weightToday = db.prepare("SELECT * FROM tracking WHERE user_id = ? AND kind = 'weight' AND date = ?").get(uid, date) || null;
 
   res.json({
-    date, greeting: hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening',
+    date, hour,
+    greeting: hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening',
     here: ctx.here, weather: ctx.weather,
     activeTrip: ctx.activeTrip, upcomingTrip: ctx.upcomingTrip,
     events: p.events, nextEvent,

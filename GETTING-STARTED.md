@@ -121,6 +121,11 @@ That's the whole system. Everything else is Sage's job.
 - *"The windows need resurfacing but not until September."* → waits until
   September instead of nagging in July
 
+**Staying signed in** is fine and intended — every time you open Sage the
+session slides forward, so it won't log you out. Your phone's own lock (and
+Face ID, in Settings) is what actually protects it. Signing out everywhere is
+in Settings if you ever need it.
+
 **When you want Sage to remember something** — just say *"remember that…"*,
 or add it under **More → 🧠 What Sage knows**. That's for things that are
 simply true about your life — a decision you reached, a preference, why

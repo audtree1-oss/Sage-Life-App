@@ -384,6 +384,27 @@ function fireflies() {
     <span class="firefly" style="left:${f.x}%;top:${f.y}%;--dx:${f.dx}px;--dy:${f.dy}px;--dur:${f.dur}s;--pulse:${f.pulse}s;--delay:${f.delay}s"></span>`).join('')}</div>`;
 }
 
+// Sage keeps its own clock — the phone's would be right, but everything else
+// in the app reasons in her timezone and they must never disagree.
+let CLOCK_HOUR_OFFSET = null;
+function clockTime() {
+  const d = new Date();
+  if (CLOCK_HOUR_OFFSET !== null) d.setMinutes(d.getMinutes() + CLOCK_HOUR_OFFSET);
+  return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+}
+function clockDate() {
+  const d = new Date();
+  if (CLOCK_HOUR_OFFSET !== null) d.setMinutes(d.getMinutes() + CLOCK_HOUR_OFFSET);
+  return d.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+}
+// She wants this as her home screen, so the time has to actually be the time.
+setInterval(() => {
+  const t = document.getElementById('clock-time');
+  if (t) t.textContent = clockTime();
+  const dd = document.getElementById('clock-date');
+  if (dd) dd.textContent = clockDate();
+}, 10000);
+
 // She can open the day whenever she likes; once she has, it stays open for
 // the rest of that day rather than making her tap through it again.
 function morningOpened(date) {
@@ -396,12 +417,20 @@ function openTheDay(date) {
 VIEWS.now = async function renderNow() {
   const d = await api('/api/views/now');
   const wx = d.weather ? `${d.weather.tempNow}° ${d.weather.todayRain ? '🌧️' : '☀️'}` : '';
+  // Keep the on-screen clock aligned with Sage's timezone rather than the
+  // phone's, in case she ever opens it from somewhere else.
+  if (typeof d.hour === 'number') CLOCK_HOUR_OFFSET = (d.hour - new Date().getHours()) * 60;
+  // Fireflies belong to dusk. They're on the morning screen because she loved
+  // them there — but this is their real hour.
+  const evening = typeof d.hour === 'number' && d.hour >= 19;
 
   // The morning hour: presence first. Nothing here is a list.
   if (d.morning && !morningOpened(d.date)) {
     $('#main').innerHTML = `
       <div class="morning">
         ${fireflies()}
+        <div class="clock"><span id="clock-time">${esc(clockTime())}</span></div>
+        <div class="clock-date" id="clock-date">${esc(clockDate())}</div>
         <h1>${d.greeting}, ${esc(ME.name.split(' ')[0])}.</h1>
         ${d.morning.notes.map((n) => `<p class="morning-note">${esc(n)}</p>`).join('')}
         ${d.morning.soon ? `
@@ -438,6 +467,12 @@ VIEWS.now = async function renderNow() {
   else if (d.upcomingTrip) bits.push(`<div class="card clay"><b>🚗 ${esc(d.upcomingTrip.location_key)} ${fmtDate(d.upcomingTrip.start_date)}</b><div class="quiet">The departure checklist appears the day before.</div></div>`);
 
   $('#main').innerHTML = `
+    <div class="now-wrap${evening ? ' dusk' : ''}">
+    ${evening ? fireflies() : ''}
+    <div class="clock-row">
+      <span class="clock" id="clock-time">${esc(clockTime())}</span>
+      <span class="clock-date" id="clock-date">${esc(clockDate())}</span>
+    </div>
     <div class="now-head">
       <h1>${d.greeting}, ${esc(ME.name.split(' ')[0])}.</h1>
       ${wx ? `<span class="wx">${esc(d.here?.name || '')} ${wx}</span>` : ''}
@@ -456,6 +491,7 @@ VIEWS.now = async function renderNow() {
     <div class="btn-row" style="margin-top:16px">
       <button class="btn ghost small" id="ask-sage" style="flex:1">💬 Ask Sage</button>
       <button class="btn ghost small" data-goto="think" style="flex:1">💭 Think something through</button>
+    </div>
     </div>`;
 
   wireItems($('#main'));
