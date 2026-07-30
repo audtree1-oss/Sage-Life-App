@@ -121,6 +121,12 @@ That's the whole system. Everything else is Sage's job.
 - *"The windows need resurfacing but not until September."* → waits until
   September instead of nagging in July
 
+**When you want Sage to remember something** — just say *"remember that…"*,
+or add it under **More → 🧠 What Sage knows**. That's for things that are
+simply true about your life — a decision you reached, a preference, why
+something matters — as opposed to things you have to do. Everything Sage
+knows is listed there, and you can change or delete any of it.
+
 **When Sage gets something wrong** — open the item and say what's wrong in
 the box at the top: *"that isn't urgent, leave it until September"* or
 *"that's for the lake."* No forms, no categories to learn.

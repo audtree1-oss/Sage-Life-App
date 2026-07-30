@@ -276,6 +276,8 @@ CREATE TABLE IF NOT EXISTS threads (
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   title TEXT NOT NULL DEFAULT '',
   kind TEXT NOT NULL DEFAULT 'thinking',   -- thinking | bedtime
+  summary TEXT NOT NULL DEFAULT '',        -- rolling gist, so long talks keep continuity
+  summarized_upto INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -287,6 +289,26 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id, id);
+
+-- Tier two of the spec's three (§24): "stable personal context and
+-- collaborative decision principles belong in retrievable memory."
+-- Durable things learned about her — not tasks, not chat. Nothing lands here
+-- without her approving it, and everything here is visible and deletable,
+-- because memory she cannot inspect is memory she cannot trust.
+CREATE TABLE IF NOT EXISTS memories (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  content TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'fact',     -- fact | preference | decision | principle | person | place
+  source TEXT NOT NULL DEFAULT 'her',    -- her | thread | seed
+  thread_id INTEGER NOT NULL DEFAULT 0,
+  pinned INTEGER NOT NULL DEFAULT 0,     -- always retrieved, never crowded out
+  use_count INTEGER NOT NULL DEFAULT 0,
+  last_used_at TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id);
 
 -- iCloud calendar, read-only. The credential is an app-specific password,
 -- encrypted at rest, revocable from appleid.apple.com without touching Sage.
@@ -1790,6 +1812,9 @@ function selectContext(uid, ctx, { text = '', budget = 24, routines = [] } = {})
   const prefs = Object.fromEntries(
     db.prepare('SELECT key, value FROM preferences WHERE user_id = ?').all(uid)
       .filter((r) => r.key !== 'cal_last_sync').map((r) => [r.key, r.value]));
+  // Durable things she has told Sage to remember, chosen the same way as
+  // everything else: by what she is talking about right now.
+  const remembered = recallMemories(uid, text);
 
   return {
     today: t,
@@ -1813,6 +1838,7 @@ function selectContext(uid, ctx, { text = '', budget = 24, routines = [] } = {})
     projects: live.filter((i) => i.type === 'project')
       .slice(0, 30).map((p) => ({ id: p.id, title: p.title, next_action: p.next_action || undefined })),
     aboutHer: prefs,
+    remembered: remembered.length ? remembered : undefined,
     // Honesty about the slice: without this the reasoning layer will happily
     // conclude "you have nothing else on" from a partial view.
     notShown: Math.max(0, all.length - chosen.size),
@@ -1847,9 +1873,11 @@ Each proposal is one of:
 {"kind":"update","confidence":"high"|"low","item_id":123,"changes":{...same item fields...},"why":"short"}
 {"kind":"tracking","kindOf":"weight","value":150.0,"date":"YYYY-MM-DD"}
 {"kind":"trip","location_key":"lake","start_date":"YYYY-MM-DD","end_date":""}
+{"kind":"memory","confidence":"high"|"low","memory":{"content":"one plain sentence in the third person","kind":"fact|preference|decision|principle|person|place"}}
 
 Rules:
 - Match against openItems by meaning before creating anything new. "I paid Terminix" is a completion of an existing item, not a new one.
+- When she says "remember that…", "for future reference…", or states a lasting preference or fact about a person or place, that is a memory, not a task. Something she must DO is a task; something that is simply TRUE about her life is a memory.
 - confidence "high" only for obvious, low-risk changes; anything consequential or ambiguous is "low".
 - A greeting containing a bare number like "150.0" is a weight entry.
 - Resolve relative dates ("Friday", "tomorrow") to real dates.
@@ -1931,6 +1959,13 @@ app.post('/api/capture/apply', (req, res) => {
         .run(uid, String(p.location_key || 'lake'), String(p.start_date || p.when || today()), String(p.end_date || ''));
       logHistory(uid, 'trip', info.lastInsertRowid, 'planned', `${p.location_key || 'lake'} ${p.start_date || ''}`, 1);
       applied.push({ kind: 'trip', id: info.lastInsertRowid });
+    } else if (p.kind === 'memory' && p.memory && String(p.memory.content || '').trim()) {
+      const content = String(p.memory.content).trim().slice(0, 500);
+      const info = db.prepare(`INSERT INTO memories (user_id, content, kind, source, thread_id) VALUES (?, ?, ?, ?, ?)`)
+        .run(uid, content, MEMORY_KINDS.includes(p.memory.kind) ? p.memory.kind : 'fact',
+          p.memory.source === 'her' ? 'her' : 'thread', parseInt(p.thread_id, 10) || 0);
+      logHistory(uid, 'memory', info.lastInsertRowid, 'remembered', content.slice(0, 80), 1);
+      applied.push({ kind: 'memory', id: info.lastInsertRowid, content });
     }
   }
   res.json({ applied });
@@ -2014,6 +2049,99 @@ It is bedtime and she is emptying her head so she can sleep. This is a holding p
 - Never suggest doing anything tonight.
 - Warmth is welcome; problem-solving is not. It will all still be there tomorrow, and you are holding it so she does not have to.`;
 
+// ---------------------------------------------------------------------------
+// MEMORY — the durable middle tier. Retrieved by relevance, like everything
+// else: what she is talking about now, plus whatever she pinned.
+// ---------------------------------------------------------------------------
+const MEMORY_KINDS = ['fact', 'preference', 'decision', 'principle', 'person', 'place'];
+
+// Below this many memories, selecting is worse than not selecting: the whole
+// set is cheap to carry, and word-matching cannot connect "what should I
+// wear" to "she avoids tanks" — only the reasoning layer can. Above it,
+// fall back to relevance so the payload stays honest as her memory grows.
+const RECALL_ALL_UNDER = 30;
+
+function recallMemories(uid, text = '', limit = 10) {
+  const all = db.prepare('SELECT * FROM memories WHERE user_id = ? ORDER BY pinned DESC, updated_at DESC').all(uid);
+  if (!all.length) return [];
+
+  let chosen;
+  if (all.length <= RECALL_ALL_UNDER) {
+    chosen = all;
+  } else {
+    const tokens = [...new Set(tokenize(text))];
+    const df = new Map();
+    const cache = new Map();
+    for (const m of all) {
+      const toks = new Set(tokenize(m.content));
+      cache.set(m.id, toks);
+      for (const t of toks) df.set(t, (df.get(t) || 0) + 1);
+    }
+    const ubiquitous = Math.max(3, Math.ceil(all.length * 0.3));
+    chosen = all.map((m) => {
+      let match = 0;
+      const hay = cache.get(m.id);
+      for (const t of tokens) {
+        if (!hay.has(t)) continue;
+        const freq = df.get(t) || 1;
+        if (freq > ubiquitous) continue;
+        match += 1 / freq;
+      }
+      // Usage breaks ties between things she actually said; it must never
+      // create relevance on its own, or a memory recalled once is recalled
+      // forever regardless of the subject.
+      const score = m.pinned ? 100 + match : match;
+      return { m, score, match };
+    }).filter((x) => x.m.pinned || x.match > 0)
+      .sort((a, b) => b.score - a.score || b.m.use_count - a.m.use_count)
+      .slice(0, limit).map((x) => x.m);
+  }
+
+  if (chosen.length) {
+    const touch = db.prepare("UPDATE memories SET use_count = use_count + 1, last_used_at = datetime('now') WHERE id = ?");
+    for (const m of chosen) touch.run(m.id);
+  }
+  return chosen.map((m) => ({ id: m.id, kind: m.kind, content: m.content }));
+}
+
+app.get('/api/memories', (req, res) => {
+  const q = String(req.query.q || '').trim();
+  let sql = 'SELECT * FROM memories WHERE user_id = ?';
+  const args = [req.user.id];
+  if (q) { sql += ' AND content LIKE ?'; args.push(`%${q}%`); }
+  sql += ' ORDER BY pinned DESC, updated_at DESC LIMIT 300';
+  res.json(db.prepare(sql).all(...args));
+});
+
+app.post('/api/memories', (req, res) => {
+  const b = req.body || {};
+  const content = String(b.content || '').trim().slice(0, 500);
+  if (!content) return res.status(400).json({ error: 'What should I remember?' });
+  const info = db.prepare(`INSERT INTO memories (user_id, content, kind, source, thread_id, pinned)
+    VALUES (?, ?, ?, ?, ?, ?)`).run(req.user.id, content,
+    MEMORY_KINDS.includes(b.kind) ? b.kind : 'fact',
+    ['her', 'thread', 'seed'].includes(b.source) ? b.source : 'her',
+    parseInt(b.thread_id, 10) || 0, b.pinned ? 1 : 0);
+  logHistory(req.user.id, 'memory', info.lastInsertRowid, 'remembered', content.slice(0, 80));
+  res.json(db.prepare('SELECT * FROM memories WHERE id = ?').get(info.lastInsertRowid));
+});
+
+app.patch('/api/memories/:id', (req, res) => {
+  const m = db.prepare('SELECT * FROM memories WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
+  if (!m) return res.status(404).json({ error: 'No such memory.' });
+  const b = req.body || {};
+  db.prepare(`UPDATE memories SET content = ?, kind = ?, pinned = ?, updated_at = datetime('now') WHERE id = ?`)
+    .run(String(b.content ?? m.content).slice(0, 500),
+      MEMORY_KINDS.includes(b.kind) ? b.kind : m.kind,
+      b.pinned === undefined ? m.pinned : (b.pinned ? 1 : 0), m.id);
+  res.json(db.prepare('SELECT * FROM memories WHERE id = ?').get(m.id));
+});
+
+app.delete('/api/memories/:id', (req, res) => {
+  db.prepare('DELETE FROM memories WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
+  res.json({ ok: true });
+});
+
 function threadWithCount(t) {
   const row = db.prepare('SELECT COUNT(*) AS n, MAX(created_at) AS last FROM messages WHERE thread_id = ?').get(t.id);
   const first = db.prepare("SELECT content FROM messages WHERE thread_id = ? AND role = 'her' ORDER BY id LIMIT 1").get(t.id);
@@ -2059,11 +2187,13 @@ app.post('/api/threads/:id/message', async (req, res) => {
 
   db.prepare("INSERT INTO messages (thread_id, role, content) VALUES (?, 'her', ?)").run(t.id, text);
 
-  // Recent turns for continuity; retrieval for what her life actually holds.
+  // Recent turns verbatim; older ones as a rolling gist, so a long
+  // conversation does not quietly forget its own beginning.
   const history = db.prepare('SELECT role, content FROM messages WHERE thread_id = ? ORDER BY id DESC LIMIT 13')
     .all(t.id).reverse().slice(0, -1);
   const ctx = await buildContext(uid);
   const bedtime = t.kind === 'bedtime';
+  const earlier = t.summary ? `[Earlier in this conversation: ${t.summary}]\n\n` : '';
   // Bedtime gets no retrieval at all — nothing about her open tasks belongs
   // in that room at 11pm.
   const selection = bedtime ? null
@@ -2071,7 +2201,8 @@ app.post('/api/threads/:id/message', async (req, res) => {
 
   let reply = await askAI(
     bedtime ? BEDTIME_PERSONA : THINKING_PERSONA,
-    bedtime ? text : `${text}\n\n[Her life, for context only — do not turn this into a task list:]\n${JSON.stringify(selection)}`,
+    bedtime ? text
+      : `${earlier}${text}\n\n[Her life, for context only — do not turn this into a task list:]\n${JSON.stringify(selection)}`,
     { maxTokens: bedtime ? 120 : 700, tier: 'smart', history },
   );
   if (!reply) {
@@ -2087,7 +2218,31 @@ app.post('/api/threads/:id/message', async (req, res) => {
   }
   db.prepare("UPDATE threads SET updated_at = datetime('now') WHERE id = ?").run(t.id);
   res.json({ reply, thread: threadWithCount(db.prepare('SELECT * FROM threads WHERE id = ?').get(t.id)) });
+
+  // Re-summarise in the background once the conversation outgrows the window
+  // we send verbatim. Never blocks her reply.
+  summariseIfNeeded(uid, t.id).catch(() => {});
 });
+
+const SUMMARY_AFTER = 14;
+async function summariseIfNeeded(uid, threadId) {
+  const t = db.prepare('SELECT * FROM threads WHERE id = ? AND user_id = ?').get(threadId, uid);
+  if (!t || t.kind === 'bedtime') return;                 // bedtime keeps nothing
+  const all = db.prepare('SELECT id, role, content FROM messages WHERE thread_id = ? ORDER BY id').all(threadId);
+  if (all.length < SUMMARY_AFTER) return;
+  const cutoff = all[all.length - 12].id;                 // everything before the verbatim window
+  if (cutoff <= t.summarized_upto) return;
+  const older = all.filter((m) => m.id < cutoff);
+  if (!older.length) return;
+  const gist = await askAI(
+    'Summarise the earlier part of a conversation so it can be carried forward. Keep what was decided, what was ruled out, and what still matters. Drop pleasantries. Third person, under 120 words, plain sentences. Reply with the summary only.',
+    older.map((m) => `${m.role === 'her' ? 'Regena' : 'Sage'}: ${m.content}`).join('\n'),
+    { maxTokens: 260, tier: 'fast' },
+  );
+  if (gist) {
+    db.prepare('UPDATE threads SET summary = ?, summarized_upto = ? WHERE id = ?').run(gist.trim(), cutoff, threadId);
+  }
+}
 
 // Only when she asks: pull real commitments out of a conversation. Proposals
 // only — she still approves each one, exactly like capture.
@@ -2102,12 +2257,13 @@ app.post('/api/threads/:id/harvest', async (req, res) => {
   const ai = await askAI(
     SAGE_PERSONA + `
 
-Read a conversation and pull out ONLY what she actually decided to do. Reply ONLY with JSON: {"reply": string, "proposals": [...]}.
-Proposal shapes match capture: {"kind":"item","confidence":"high"|"low","item":{...}} and {"kind":"complete","item_id":123,"why":""}.
+Read a conversation and pull out what is worth keeping. Reply ONLY with JSON: {"reply": string, "proposals": [...]}.
+Proposal shapes: {"kind":"item","confidence":"high"|"low","item":{...}} · {"kind":"complete","item_id":123,"why":""} · {"kind":"memory","confidence":"high"|"low","memory":{"content":"one plain sentence in the third person","kind":"fact|preference|decision|principle|person|place"}}
 Be strict and conservative:
 - A thought is not a commitment. Wondering, weighing, or "maybe someday" is NOT a task.
-- Only include something she clearly settled on.
-- If she settled on nothing, return an empty proposals array and say so plainly. That is a good outcome, not a failure.
+- Only propose an item for something she clearly settled on doing.
+- Propose a memory for something durable that would be useful months from now — a decision reached, a preference stated, a fact about a person or place. NOT a task, NOT a passing mood, NOT anything already obvious from her existing data.
+- If nothing qualifies, return an empty proposals array and say so plainly. That is a good outcome, not a failure.
 - Anything tentative goes in as importance "opportunity" or "someday", never "must".`,
     `Conversation:\n${msgs.map((m) => `${m.role === 'her' ? 'Regena' : 'Sage'}: ${m.content}`).join('\n')}\n\nHer current state:\n${JSON.stringify(selectContext(uid, ctx, { text: msgs.map((m) => m.content).join(' '), budget: 15 }))}`,
     { maxTokens: 1200, json: true, tier: 'smart' },
