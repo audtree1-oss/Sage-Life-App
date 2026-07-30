@@ -202,6 +202,19 @@ CREATE TABLE IF NOT EXISTS inventory (
   photo_file TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS sage_files (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  related_item_id INTEGER NOT NULL DEFAULT 0,
+  stored_name TEXT NOT NULL,
+  original_name TEXT NOT NULL,
+  mime_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  title TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'uploaded',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 -- Health/tracking lives apart from task data on purpose (spec §5, §12).
 CREATE TABLE IF NOT EXISTS tracking (
   id INTEGER PRIMARY KEY,
@@ -444,6 +457,7 @@ app.post('/api/logout', (req, res) => {
 
 app.use('/api', requireAuth);
 app.use('/photos', requireAuth);
+app.use('/files', requireAuth);
 
 // ---------------------------------------------------------------------------
 // AI layer — one function, provider swappable (spec §3, §13)
@@ -794,6 +808,25 @@ const upload = multer({
   limits: { fileSize: 15 * 1024 * 1024 },
 });
 
+const FILE_TYPES = new Set([
+  'application/pdf',
+  'image/jpeg', 'image/png', 'image/heic', 'image/heif', 'image/webp',
+  'text/plain', 'text/csv',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+]);
+const fileUpload = multer({
+  storage: multer.diskStorage({
+    destination: UPLOAD_DIR,
+    filename: (req, file, cb) => cb(null, crypto.randomBytes(16).toString('hex')
+      + path.extname(file.originalname).slice(0, 10).replace(/[^.\w]/g, '')),
+  }),
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => cb(null, FILE_TYPES.has(file.mimetype)),
+});
+
 app.post('/api/items/:id/photo', upload.single('file'), (req, res) => {
   const it = db.prepare('SELECT * FROM items WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
   if (!it || !req.file) return res.status(404).json({ error: 'No such item.' });
@@ -806,6 +839,58 @@ app.get('/photos/:file', (req, res) => {
   const p = path.join(UPLOAD_DIR, f);
   if (!fs.existsSync(p)) return res.status(404).send('Not found');
   res.sendFile(p);
+});
+
+// Her private file cabinet. Metadata lives in SQLite; bytes live beside the
+// existing photo uploads on Sage's persistent data disk.
+app.get('/api/files', (req, res) => {
+  res.json(db.prepare(`
+    SELECT f.*, i.title AS related_item_title
+    FROM sage_files f LEFT JOIN items i
+      ON i.id = f.related_item_id AND i.user_id = f.user_id
+    WHERE f.user_id = ? ORDER BY f.created_at DESC, f.id DESC`).all(req.user.id));
+});
+
+app.post('/api/files', fileUpload.single('file'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Choose a PDF, photo, text file, Word document, or spreadsheet.' });
+  const related = parseInt((req.body || {}).related_item_id, 10) || 0;
+  if (related && !db.prepare('SELECT id FROM items WHERE id = ? AND user_id = ?').get(related, req.user.id)) {
+    try { fs.unlinkSync(req.file.path); } catch {}
+    return res.status(400).json({ error: 'That linked Sage item no longer exists.' });
+  }
+  const original = String(req.file.originalname || 'File').slice(0, 240);
+  const title = String((req.body || {}).title || '').trim().slice(0, 160)
+    || path.basename(original, path.extname(original));
+  const note = String((req.body || {}).note || '').trim().slice(0, 2000);
+  const info = db.prepare(`INSERT INTO sage_files
+    (user_id, related_item_id, stored_name, original_name, mime_type, size_bytes, title, note)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(req.user.id, related, req.file.filename, original, req.file.mimetype, req.file.size, title, note);
+  logHistory(req.user.id, 'file', info.lastInsertRowid, 'uploaded', title);
+  res.json(db.prepare('SELECT * FROM sage_files WHERE id = ?').get(info.lastInsertRowid));
+});
+
+app.get('/files/:id', (req, res) => {
+  const f = db.prepare('SELECT * FROM sage_files WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
+  if (!f) return res.status(404).send('Not found');
+  const p = path.join(UPLOAD_DIR, f.stored_name);
+  if (!fs.existsSync(p)) return res.status(404).send('File is missing from storage');
+  res.set('X-Content-Type-Options', 'nosniff');
+  if (f.mime_type === 'application/pdf' || f.mime_type.startsWith('image/')) {
+    res.type(f.mime_type);
+    res.set('Content-Disposition', `inline; filename="${f.original_name.replace(/["\r\n]/g, '')}"`);
+    return res.sendFile(p);
+  }
+  res.download(p, f.original_name);
+});
+
+app.delete('/api/files/:id', (req, res) => {
+  const f = db.prepare('SELECT * FROM sage_files WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
+  if (!f) return res.status(404).json({ error: 'That file is already gone.' });
+  try { fs.unlinkSync(path.join(UPLOAD_DIR, f.stored_name)); } catch {}
+  db.prepare('DELETE FROM sage_files WHERE id = ? AND user_id = ?').run(f.id, req.user.id);
+  logHistory(req.user.id, 'file', f.id, 'deleted', f.title);
+  res.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -1816,6 +1901,8 @@ app.get('/api/export.json', (req, res) => {
     locations: db.prepare('SELECT * FROM locations WHERE user_id = ?').all(uid),
     trips: db.prepare('SELECT * FROM trips WHERE user_id = ?').all(uid),
     inventory: db.prepare('SELECT * FROM inventory WHERE user_id = ?').all(uid),
+    files: db.prepare(`SELECT id, related_item_id, original_name, mime_type, size_bytes, title, note, source, created_at
+      FROM sage_files WHERE user_id = ? ORDER BY id`).all(uid),
     tracking: db.prepare('SELECT * FROM tracking WHERE user_id = ?').all(uid),
     preferences: db.prepare('SELECT key, value FROM preferences WHERE user_id = ?').all(uid),
     history: db.prepare('SELECT * FROM history WHERE user_id = ?').all(uid),
