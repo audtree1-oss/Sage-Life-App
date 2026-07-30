@@ -44,20 +44,49 @@ function decrypt(blob, secret) {
 function stripNs(xml) {
   return String(xml).replace(/<\/?[a-zA-Z0-9_-]+:/g, (m) => (m[1] === '/' ? '</' : '<'));
 }
+// Match on the local name only, and only when the name actually ends there —
+// `<calendar-color>` must not answer to `calendar`. Attributes are allowed,
+// because iCloud writes `<calendar xmlns="urn:ietf:params:xml:ns:caldav"/>`
+// where other servers write `<C:calendar/>`.
+function openTag(tag) {
+  return `<${tag}(?:\\s[^>]*?)?(/?)\\s*>`;
+}
 function allBlocks(xml, tag) {
   const out = [];
-  const re = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`, 'gi');
+  const re = new RegExp(`${openTag(tag)}([\\s\\S]*?)</${tag}\\s*>`, 'gi');
   let m;
-  while ((m = re.exec(xml))) out.push(m[1]);
+  while ((m = re.exec(xml))) {
+    if (m[1] === '/') continue; // self-closing: no content to collect
+    out.push(m[2]);
+  }
   return out;
 }
 function firstValue(xml, tag) {
-  const m = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`, 'i').exec(xml);
-  return m ? m[1].trim() : '';
+  const s = String(xml);
+  const open = new RegExp(openTag(tag), 'i').exec(s);
+  if (!open) return '';
+  if (open[1] === '/') return ''; // <displayname/> — present but empty
+  const rest = s.slice(open.index + open[0].length);
+  const close = new RegExp(`</${tag}\\s*>`, 'i').exec(rest);
+  return close ? rest.slice(0, close.index).trim() : '';
 }
+// Is this element present at all? Used for resourcetype flags, which carry
+// their meaning in the tag name rather than in any content.
+function hasElement(xml, tag) {
+  return new RegExp(openTag(tag), 'i').test(String(xml));
+}
+// Numeric references matter more than they look: iCloud sends the CRLF line
+// endings inside <calendar-data> as `&#13;`, so leaving them undecoded leaves a
+// stray "&#13;" glued to the end of every DTSTART — the date then fails to
+// parse and the appointment is silently dropped.
 function decodeEntities(s) {
-  return String(s).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'").replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+  const codePoint = (n) => (Number.isFinite(n) && n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : '');
+  return String(s)
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => codePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => codePoint(parseInt(d, 10)))
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&'); // last, so "&amp;lt;" survives as "&lt;"
 }
 function resolve(base, href) {
   try { return new URL(href, base).toString(); } catch { return href; }
@@ -160,7 +189,7 @@ async function listCalendars(homeUrl, appleId, password) {
     const href = decodeEntities(firstValue(block, 'href'));
     if (!href) continue;
     const rtype = firstValue(block, 'resourcetype');
-    if (!/<calendar\s*\/?>/i.test(rtype)) continue;              // skip inbox/outbox/home itself
+    if (!hasElement(rtype, 'calendar')) continue;                // skip inbox/outbox/home itself
     const comps = firstValue(block, 'supported-calendar-component-set');
     const supportsEvents = !comps || /name=["']?VEVENT["']?/i.test(comps);
     const supportsTodos = /name=["']?VTODO["']?/i.test(comps);
@@ -329,5 +358,5 @@ function inferEventKind(title) {
 
 module.exports = {
   encrypt, decrypt, discover, listCalendars, fetchEvents, fetchTodos, fetchFeed, inferEventKind,
-  _internals: { parseEvents, parseTodos, parseIcalDate, stripNs, unfold, calendarName },
+  _internals: { parseEvents, parseTodos, parseIcalDate, stripNs, unfold, calendarName, firstValue, allBlocks, hasElement },
 };

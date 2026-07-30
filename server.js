@@ -2677,6 +2677,11 @@ async function syncCalendars(uid, { force = false } = {}) {
       const { acct, password } = creds;
       try {
         const collections = await caldav.listCalendars(acct.home_url, acct.apple_id, password);
+        // Zero collections used to show as a quiet "No calendars found yet",
+        // which reads like patience when it is actually a failure. Say so.
+        if (!collections.length) {
+          throw new Error('Connected to iCloud, but it listed no calendars. If your appointments live in a Gmail or Outlook account rather than iCloud, add that calendar with a calendar link instead.');
+        }
         const cals = collections.filter((c) => c.supportsEvents);
         const lists = collections.filter((c) => c.supportsTodos);
         const upsert = db.prepare(`INSERT INTO cal_calendars (user_id, url, name, color, kind) VALUES (?, ?, ?, ?, 'caldav')
