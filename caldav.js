@@ -194,9 +194,14 @@ async function listCalendars(homeUrl, appleId, password) {
     const supportsEvents = !comps || /name=["']?VEVENT["']?/i.test(comps);
     const supportsTodos = /name=["']?VTODO["']?/i.test(comps);
     if (!supportsEvents && !supportsTodos) continue;
+    // Some collections come back with no name, or with a literal "null" that a
+    // third-party app wrote years ago. Neither is a name a person can act on.
+    // A name that merely *contains* those words is hers, and stays untouched.
+    const given = decodeEntities(firstValue(block, 'displayname')).trim();
+    const nameless = !given || /^(null|undefined)$/i.test(given);
     out.push({
       url: resolve(homeUrl, href),
-      name: decodeEntities(firstValue(block, 'displayname')) || 'Calendar',
+      name: nameless ? (supportsTodos && !supportsEvents ? 'Unnamed list' : 'Unnamed calendar') : given,
       color: (decodeEntities(firstValue(block, 'calendar-color')) || '').slice(0, 9),
       supportsEvents,
       supportsTodos,
