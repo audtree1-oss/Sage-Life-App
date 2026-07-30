@@ -2809,11 +2809,18 @@ app.get('/api/calendar/status', (req, res) => {
   const cals = db.prepare('SELECT id, name, color, enabled, kind, last_error, url FROM cal_calendars WHERE user_id = ? ORDER BY kind, name').all(req.user.id);
   const lists = db.prepare('SELECT id, name, color, enabled, last_error FROM reminder_lists WHERE user_id = ? ORDER BY name').all(req.user.id);
   const lastSync = db.prepare("SELECT value FROM preferences WHERE user_id = ? AND key = 'cal_last_sync'").get(req.user.id);
+  // How much each source actually brought back. "Connected" and "sending
+  // something" are different questions, and only the second one is the one she
+  // is really asking when a list looks wrong.
+  const tally = (rows, key) => Object.fromEntries(rows.map((r) => [r[key], r.n]));
+  const evCount = tally(db.prepare('SELECT calendar_id, COUNT(*) AS n FROM cal_events WHERE user_id = ? GROUP BY calendar_id').all(req.user.id), 'calendar_id');
+  const remCount = tally(db.prepare('SELECT list_id, COUNT(*) AS n FROM external_reminders WHERE user_id = ? AND completed = 0 GROUP BY list_id').all(req.user.id), 'list_id');
+  const withCounts = (rows, counts) => rows.map((r) => ({ ...r, items: counts[r.id] || 0 }));
   res.json({
     icloud: acct ? { connected: true, apple_id: acct.apple_id, last_error: acct.last_error } : { connected: false },
-    calendars: cals.filter((c) => c.kind === 'caldav'),
-    feeds: cals.filter((c) => c.kind === 'ics').map((f) => ({ ...f, url: undefined })),
-    reminder_lists: lists,
+    calendars: withCounts(cals.filter((c) => c.kind === 'caldav'), evCount),
+    feeds: withCounts(cals.filter((c) => c.kind === 'ics'), evCount).map((f) => ({ ...f, url: undefined })),
+    reminder_lists: withCounts(lists, remCount),
     last_sync: lastSync ? lastSync.value : '',
     connected: !!acct || cals.some((c) => c.kind === 'ics'),
     event_count: db.prepare('SELECT COUNT(*) AS n FROM cal_events WHERE user_id = ?').get(req.user.id).n,
