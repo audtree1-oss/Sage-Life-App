@@ -31,6 +31,53 @@ async function api(path, opts = {}) {
   return data;
 }
 
+const bytesFromB64 = (s) => {
+  const b64 = String(s).replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(String(s).length / 4) * 4, '=');
+  return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+};
+const b64FromBytes = (value) => {
+  if (value === null || value === undefined) return null;
+  const bytes = new Uint8Array(value);
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+};
+function registrationOptionsFromJSON(o) {
+  return {
+    ...o,
+    challenge: bytesFromB64(o.challenge),
+    user: { ...o.user, id: bytesFromB64(o.user.id) },
+    excludeCredentials: (o.excludeCredentials || []).map((c) => ({ ...c, id: bytesFromB64(c.id) })),
+  };
+}
+function authenticationOptionsFromJSON(o) {
+  return {
+    ...o,
+    challenge: bytesFromB64(o.challenge),
+    allowCredentials: (o.allowCredentials || []).map((c) => ({ ...c, id: bytesFromB64(c.id) })),
+  };
+}
+function credentialToJSON(c) {
+  const r = c.response;
+  const response = { clientDataJSON: b64FromBytes(r.clientDataJSON) };
+  if (r.attestationObject) {
+    response.attestationObject = b64FromBytes(r.attestationObject);
+    response.transports = r.getTransports ? r.getTransports() : [];
+    response.publicKeyAlgorithm = r.getPublicKeyAlgorithm ? r.getPublicKeyAlgorithm() : undefined;
+    if (r.getAuthenticatorData) response.authenticatorData = b64FromBytes(r.getAuthenticatorData());
+    if (r.getPublicKey) response.publicKey = b64FromBytes(r.getPublicKey());
+  } else {
+    response.authenticatorData = b64FromBytes(r.authenticatorData);
+    response.signature = b64FromBytes(r.signature);
+    if (r.userHandle) response.userHandle = b64FromBytes(r.userHandle);
+  }
+  return {
+    id: c.id, rawId: b64FromBytes(c.rawId), type: c.type,
+    authenticatorAttachment: c.authenticatorAttachment,
+    clientExtensionResults: c.getClientExtensionResults(), response,
+  };
+}
+
 function toast(msg, ms = 3000) {
   const el = document.createElement('div');
   el.className = 'toast';
@@ -94,6 +141,8 @@ function renderAuth(needsSetup) {
         <label class="field">Password${needsSetup ? ' (8 characters or more)' : ''}</label>
         <input type="password" id="a-pass" autocomplete="${needsSetup ? 'new-password' : 'current-password'}">
         <div style="margin-top:18px"><button class="btn big" id="a-go">${needsSetup ? 'Set up Sage' : 'Sign in'}</button></div>
+        ${needsSetup ? '' : `<button class="btn big ghost" id="a-passkey" style="display:none;margin-top:10px">Use Face ID</button>
+          <button class="btn ghost small" id="a-recover" style="margin-top:10px">Forgot password?</button>`}
       </div>
     </div>`;
   const go = async () => {
@@ -105,6 +154,40 @@ function renderAuth(needsSetup) {
   };
   $('#a-go').onclick = go;
   $('#a-pass').addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
+  if (!needsSetup && window.PublicKeyCredential) {
+    api('/api/passkey/available').then(({ available }) => {
+      if (available) $('#a-passkey').style.display = '';
+    }).catch(() => {});
+    $('#a-passkey').onclick = async () => {
+      try {
+        const start = await api('/api/passkey/auth/options', { method: 'POST' });
+        const credential = await navigator.credentials.get({ publicKey: authenticationOptionsFromJSON(start.options) });
+        await api('/api/passkey/auth/verify', { method: 'POST', body: {
+          flow_id: start.flow_id, response: credentialToJSON(credential),
+        } });
+        boot();
+      } catch (e) { toast(e.name === 'NotAllowedError' ? 'Face ID was cancelled.' : e.message, 5000); }
+    };
+  }
+  if ($('#a-recover')) $('#a-recover').onclick = openRecovery;
+}
+
+function openRecovery() {
+  const m = openModal(`
+    <h2>Recover Sage</h2>
+    <p class="sub">Use the one-time recovery code saved when Face ID was set up.</p>
+    <label class="field">Email</label><input type="email" id="rec-email" autocomplete="email">
+    <label class="field">Recovery code</label><input id="rec-code" autocapitalize="characters" autocomplete="off">
+    <label class="field">New password</label><input type="password" id="rec-pass" autocomplete="new-password" placeholder="10 characters or more">
+    <button class="btn big" id="rec-go" style="margin-top:16px">Set new password</button>`);
+  $('#rec-go', m).onclick = async () => {
+    try {
+      await api('/api/recovery/reset', { method: 'POST', body: {
+        email: $('#rec-email', m).value, code: $('#rec-code', m).value, password: $('#rec-pass', m).value,
+      } });
+      closeModal(); toast('Password changed. You’re signed back in.'); boot();
+    } catch (e) { toast(e.message, 5000); }
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -690,6 +773,8 @@ VIEWS.settings = async function renderSettings() {
       <button class="btn danger small" id="sign-out">Sign out</button>
     </div>
     <button class="btn danger small" id="sign-out-all" style="margin-top:10px">Sign out everywhere</button>
+    <h2>🔐 Sign-in security</h2>
+    <div id="security-box"><div class="card"><span class="quiet">Checking…</span></div></div>
     <h2>🧠 Thinking layer</h2>
     <div class="card" id="ai-status"><span class="quiet">${AI_ON ? 'Checking…' : 'No key set — capture still works, just more literally.'}</span></div>
     <div class="card">
@@ -731,6 +816,7 @@ VIEWS.settings = async function renderSettings() {
     setView('settings');
   };
   renderICloudBox();
+  renderSecurityBox();
   if (AI_ON) api('/api/ai/status').then((s) => {
     const el = $('#ai-status');
     if (!el) return;
@@ -743,6 +829,61 @@ VIEWS.settings = async function renderSettings() {
          Everything else still works.</div>`;
   }).catch(() => {});
 };
+
+async function renderSecurityBox() {
+  const box = $('#security-box');
+  if (!box) return;
+  const s = await api('/api/security/status');
+  box.innerHTML = `
+    <div class="card">
+      <b>${s.passkeys.length ? '✅ Face ID is ready' : 'Face ID / passkey'}</b>
+      <p class="quiet" style="margin:4px 0 10px">${s.passkeys.length
+        ? `Sage has ${s.passkeys.length} passkey${s.passkeys.length === 1 ? '' : 's'}. Your password still works as a fallback.`
+        : 'Add this iPhone’s passkey so you can sign in with Face ID.'}</p>
+      <button class="btn small" id="passkey-add">${s.passkeys.length ? 'Add another device' : 'Set up Face ID'}</button>
+      ${s.passkeys.map((p) => `<div class="row flat" style="margin-top:8px">
+        <div class="body"><div class="title">Passkey ${p.backed_up ? '· synced' : ''}</div>
+          <div class="quiet">Added ${fmtDate(p.created_at.slice(0, 10))}${p.last_used ? ` · last used ${fmtDate(p.last_used.slice(0, 10))}` : ''}</div></div>
+        <button class="btn danger small" data-passkey-del="${p.id}">Remove</button>
+      </div>`).join('')}
+    </div>
+    <div class="card">
+      <b>${s.has_recovery ? '✅ Recovery code is set' : 'Recovery code'}</b>
+      <p class="quiet" style="margin:4px 0 10px">This is the emergency way back in if the password is forgotten and Face ID is unavailable.</p>
+      <button class="btn ghost small" id="recovery-make">${s.has_recovery ? 'Replace recovery code' : 'Create recovery code'}</button>
+    </div>
+    <p class="quiet">New sign-ins stay active for up to ${s.session_days} days.</p>`;
+  $('#passkey-add', box).onclick = async () => {
+    if (!window.PublicKeyCredential) return toast('This browser does not support passkeys.');
+    try {
+      const start = await api('/api/passkey/register/options', { method: 'POST' });
+      const credential = await navigator.credentials.create({ publicKey: registrationOptionsFromJSON(start.options) });
+      await api('/api/passkey/register/verify', { method: 'POST', body: {
+        flow_id: start.flow_id, response: credentialToJSON(credential),
+      } });
+      toast('Face ID is ready.'); renderSecurityBox();
+    } catch (e) { toast(e.name === 'NotAllowedError' ? 'Face ID setup was cancelled.' : e.message, 5000); }
+  };
+  $$('[data-passkey-del]', box).forEach((b) => b.onclick = async () => {
+    if (!confirm('Remove this passkey? The password will still work.')) return;
+    await api(`/api/security/passkeys/${b.dataset.passkeyDel}`, { method: 'DELETE' });
+    toast('Passkey removed.'); renderSecurityBox();
+  });
+  $('#recovery-make', box).onclick = async () => {
+    if (s.has_recovery && !confirm('Replace the old recovery code? The old one will stop working immediately.')) return;
+    const { code } = await api('/api/security/recovery-code', { method: 'POST' });
+    const m = openModal(`
+      <h2>Save this recovery code</h2>
+      <p class="sub">This is shown once. Put it somewhere safe outside Sage.</p>
+      <div class="card sage center" style="font-size:1.18em;letter-spacing:.08em"><b>${esc(code)}</b></div>
+      <button class="btn big" id="recovery-copy">Copy code</button>
+      <button class="btn ghost big" id="recovery-done" style="margin-top:8px">I saved it</button>`);
+    $('#recovery-copy', m).onclick = async () => {
+      await navigator.clipboard.writeText(code); toast('Recovery code copied.');
+    };
+    $('#recovery-done', m).onclick = () => { closeModal(); renderSecurityBox(); };
+  };
+}
 
 // ---------------------------------------------------------------------------
 // iCloud calendar, read-only
