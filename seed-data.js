@@ -244,6 +244,59 @@ const INVENTORY = [
     store: 'Costco', note: 'David can pick these up — send him the saved product photo.' },
 ];
 
+// Her Subscriptions list, moved across from Apple Reminders on July 30, 2026.
+// iCloud will not share that list with other apps, so it was read from a
+// screenshot and typed in here rather than synced.
+//
+// Two of her reminders carry account identifiers — an AARP membership number
+// and a Terminix account number. Those are deliberately not here (spec §12/§22);
+// each note says where they still live. Everything else is kept as she wrote it,
+// with `raw` holding her original line word for word.
+const SUBSCRIPTIONS = {
+  project: {
+    title: 'Subscriptions & renewals', type: 'project', life_area: 'subscriptions',
+    outcome: 'Nothing renews, lapses or surprises me without my knowing first.',
+    note: 'Moved over from the Subscriptions list in Reminders.',
+  },
+  items: [
+    { title: 'AARP renews — $16', due_at: '2026-09-30', importance: 'should',
+      raw: 'aarp  auto renewal, $16 — 9/30/26, Yearly',
+      note: 'Yearly, on auto renewal. The membership number stays in your Reminders list.' },
+
+    { title: 'Norton renews', due_at: '2027-01-29', importance: 'should',
+      raw: 'norton renewal 2/2 — 1/29/27, Yearly', note: 'Yearly.' },
+
+    { title: 'Frndly renews', due_at: '2027-10-01', importance: 'should',
+      raw: 'frndly auto renew 10/5/25 — 10/1/27, Yearly',
+      note: 'Yearly, on auto renewal. Last renewal noted as 10/5/25.' },
+
+    { title: 'Fishing licence — expired 7/4/2026', due_at: '2026-06-04', importance: 'must',
+      raw: 'fishing liscemse expires 7/4/2026 — 6/4/26',
+      note: 'The expiry date on this one has already passed. Worth checking before the next lake trip.' },
+
+    { title: 'Roach spray at the camper', due_at: '2026-09-17', importance: 'should',
+      raw: 'quarterly roach spray at Camper — 9/17/26, Every 3 months', note: 'Every 3 months.' },
+
+    { title: 'Dermalogica subscription — the 21st', due_at: '2026-08-14', importance: 'must',
+      raw: '!!! dermalogica subscription 21st — 8/14/26, Every 3 months. spf moisturizer, cleansing, night moisterizer',
+      note: 'Every 3 months: SPF moisturiser, cleansing, night moisturiser. You had this flagged high priority.' },
+
+    { title: 'Call Rollo — birthday', due_at: '2026-09-05T12:00', importance: 'should',
+      raw: 'Call Rollo BDay! — 9/5/26, 12:00 PM, Yearly', note: 'Yearly.' },
+
+    { title: 'Paramount+ ends — $89 a year', due_at: '2027-02-25T10:00', importance: 'should',
+      raw: 'Paramount+ subscription ends March 8, 2027. Current plan $89 a year. — 2/25/27, 10:00 AM, Weekly',
+      note: 'Plan ends March 8, 2027. The reminder was set to repeat weekly, which looks unintended.' },
+
+    { title: 'HBO Max — monthly', importance: 'should',
+      raw: 'hbo max monthly', note: 'Monthly. The original reminder had no renewal date on it.' },
+
+    { title: 'Terminix — 8/2026 through 7/2027', due_at: '2026-08-30', importance: 'should',
+      raw: 'terminix acct. [number], 368.6 3%, 8/2026 through7/2027 — 8/30/26, Yearly',
+      note: 'Yearly. Written on the original as "368.6 3%". The account number stays in your Reminders list.' },
+  ],
+};
+
 // Stable operating context the reasoning layer is given every time (§2, §16, §20).
 const PREFERENCES = {
   home_location: 'evans',
@@ -257,4 +310,4 @@ const PREFERENCES = {
   goal: 'Lower cognitive load, fewer forgotten commitments, more intentional attention. Not maximum productivity.',
 };
 
-module.exports = { LOCATIONS, ROUTINES, EVENTS, TRIPS, ITEMS, INVENTORY, PREFERENCES };
+module.exports = { LOCATIONS, ROUTINES, EVENTS, TRIPS, ITEMS, INVENTORY, SUBSCRIPTIONS, PREFERENCES };
