@@ -440,6 +440,7 @@ VIEWS.more = function renderMore() {
     <h1>More</h1>
     <p class="sub">Everything else Sage keeps for you.</p>
     <div class="more-grid">
+      <button class="more-tile" data-go="search"><span>🔎</span>Search Sage</button>
       <button class="more-tile" data-go="coming"><span>🔭</span>Coming up</button>
       <button class="more-tile" data-go="opportunities"><span>🌱</span>Opportunities</button>
       <button class="more-tile" data-go="projects"><span>🎯</span>Projects</button>
@@ -452,6 +453,86 @@ VIEWS.more = function renderMore() {
       <button class="more-tile" data-go="settings"><span>⚙️</span>Settings</button>
     </div>`;
   $$('[data-go]').forEach((b) => b.onclick = () => setView(b.dataset.go));
+};
+
+VIEWS.search = function renderSearch() {
+  $('#main').innerHTML = `
+    <h1>🔎 Search Sage</h1>
+    <p class="sub">Tasks, projects, notes, appointments, reminders, routines, supplies, and file names.</p>
+    <div class="btn-row">
+      <input id="search-q" type="search" enterkeyhint="search" autocomplete="off"
+        placeholder="Try lavender, lake, dentist…" style="flex:1">
+      <button class="btn small" id="search-go">Search</button>
+    </div>
+    <div id="search-results"><div class="empty">What are we hunting for?</div></div>
+    <button class="btn ghost small" data-back style="margin-top:16px">← More</button>`;
+  const input = $('#search-q');
+  const out = $('#search-results');
+  let timer = null;
+  let searchNumber = 0;
+  const run = async () => {
+    const q = input.value.trim();
+    const mine = ++searchNumber;
+    if (!q) { out.innerHTML = '<div class="empty">What are we hunting for?</div>'; return; }
+    out.innerHTML = '<div class="empty">Searching…</div>';
+    try {
+      const d = await api(`/api/search?q=${encodeURIComponent(q)}`);
+      if (mine !== searchNumber || VIEW !== 'search') return;
+      const total = d.items.length + d.files.length + d.events.length + d.reminders.length + d.routines.length + d.inventory.length;
+      const itemResults = d.items.map((i) => `
+        <div class="row ${i.status === 'done' ? 'done' : ''}" data-open="${i.id}">
+          <div class="body">
+            <div class="title">${esc(i.title)}</div>
+            <div class="meta">${esc(TYPES[i.type] || i.type)} · ${esc(i.status)} · from ${esc(sourceLabel(i))}</div>
+            ${i.note ? `<div class="quiet">${esc(i.note.slice(0, 180))}</div>` : ''}
+          </div><span class="chev">›</span>
+        </div>`).join('');
+      const fileResults = d.files.map((f) => `
+        <div class="card">
+          <b>${fileIcon(f)} ${esc(f.title)}</b>
+          ${f.note ? `<div class="quiet">${esc(f.note)}</div>` : ''}
+          <div class="meta">${esc(f.original_name)} · encrypted file</div>
+          <a class="btn ghost small" href="/files/${f.id}" target="_blank" rel="noopener" style="margin-top:8px">Open</a>
+        </div>`).join('');
+      const eventResults = d.events.map((e) => `
+        <div class="row"><div class="body"><div class="title">📅 ${esc(e.title)}</div>
+          <div class="meta">${fmtDate(e.start)}${e.location ? ` · ${esc(e.location)}` : ''} · from ${esc(e.source_label || 'calendar')}</div>
+        </div></div>`).join('');
+      const reminderResults = d.reminders.map((r) => `
+        <div class="row ${r.completed ? 'done' : ''}"><div class="body"><div class="title">⏰ ${esc(r.title)}</div>
+          <div class="meta">${r.due ? fmtDate(r.due) : 'no date'} · from ${esc(r.source_label || 'reminders')}</div>
+          ${r.note ? `<div class="quiet">${esc(r.note.slice(0, 180))}</div>` : ''}
+        </div></div>`).join('');
+      const routineResults = d.routines.map((r) => `
+        <div class="row"><div class="body"><div class="title">${esc(r.emoji || '📋')} ${esc(r.name)}</div>
+          <div class="meta">routine${r.cadence_note ? ` · ${esc(r.cadence_note)}` : ''}</div>
+        </div></div>`).join('');
+      const inventoryResults = d.inventory.map((i) => `
+        <div class="row"><div class="body"><div class="title">📦 ${esc(i.name)}</div>
+          <div class="meta">${esc(i.state)} · ${esc(i.location_key)}${i.store ? ` · ${esc(i.store)}` : ''}</div>
+        </div></div>`).join('');
+      out.innerHTML = total ? `
+        <p class="quiet" style="margin:14px 0 8px">${total} result${total === 1 ? '' : 's'}</p>
+        ${d.items.length ? `<h2>Sage items</h2>${itemResults}` : ''}
+        ${d.events.length ? `<h2>Calendar</h2>${eventResults}` : ''}
+        ${d.reminders.length ? `<h2>Reminders</h2>${reminderResults}` : ''}
+        ${d.routines.length ? `<h2>Routines</h2>${routineResults}` : ''}
+        ${d.inventory.length ? `<h2>Supplies</h2>${inventoryResults}` : ''}
+        ${d.files.length ? `<h2>Files</h2>${fileResults}` : ''}`
+        : `<div class="empty">Nothing matched “${esc(q)}.” Sage checked all the drawers.</div>`;
+    } catch (e) {
+      if (mine === searchNumber) out.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+    }
+  };
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(run, 300);
+  });
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(timer); run(); } });
+  $('#search-go').onclick = run;
+  $('[data-back]').onclick = () => setView('more');
+  wireItems(out);
+  setTimeout(() => input.focus(), 0);
 };
 
 VIEWS.coming = async function renderComing() {
