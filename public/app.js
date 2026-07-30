@@ -569,7 +569,9 @@ VIEWS.settings = async function renderSettings() {
       ? `<b>✅ Connected</b> — ${esc(s.provider)}<div class="quiet" style="margin-top:4px">
          Sage picks the model automatically: <b>${esc(s.fast)}</b> for sorting what you say,
          <b>${esc(s.smart)}</b> for thinking with you.</div>`
-      : `<b>⚠️ Key is set, but the call failed</b><div class="quiet" style="margin-top:4px">Check the key in Render → Environment. Everything else still works.</div>`;
+      : `<b>⚠️ Key is set, but the call failed</b><div class="quiet" style="margin-top:4px">
+         ${s.error ? esc(s.error) : 'Open Render → Logs for the provider response.'}
+         Everything else still works.</div>`;
   }).catch(() => {});
 };
 
