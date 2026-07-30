@@ -274,13 +274,39 @@ CREATE INDEX IF NOT EXISTS idx_cal_events_start ON cal_events(user_id, start);
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
-function today() { return new Date().toISOString().slice(0, 10); }
-function daysFromNow(n) { const d = new Date(); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); }
-// Date arithmetic relative to a given day, not to the real today — the views
-// can be asked about any date, and every "is it soon?" test must move with it.
-function daysFrom(date, n) { const d = new Date(date + 'T12:00'); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); }
-function dowOf(date) { return new Date(date + 'T12:00').getDay(); }       // 0=Sun
-function monthOf(date) { return new Date(date + 'T12:00').getMonth() + 1; }
+const APP_TIME_ZONE = process.env.APP_TIME_ZONE || 'America/New_York';
+const DATE_PARTS = new Intl.DateTimeFormat('en-US', {
+  timeZone: APP_TIME_ZONE, year: 'numeric', month: '2-digit', day: '2-digit',
+});
+const TIME_PARTS = new Intl.DateTimeFormat('en-US', {
+  timeZone: APP_TIME_ZONE, hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+});
+function zonedParts(formatter, date = new Date()) {
+  return Object.fromEntries(formatter.formatToParts(date)
+    .filter((p) => p.type !== 'literal').map((p) => [p.type, p.value]));
+}
+function today() {
+  const p = zonedParts(DATE_PARTS);
+  return `${p.year}-${p.month}-${p.day}`;
+}
+// Calendar arithmetic starts with Sage's local date, then uses UTC only to
+// add whole days without daylight-saving transitions shifting the result.
+function daysFrom(date, n) {
+  const [y, m, d] = String(date).slice(0, 10).split('-').map(Number);
+  const shifted = new Date(Date.UTC(y, m - 1, d + n));
+  return shifted.toISOString().slice(0, 10);
+}
+function daysFromNow(n) { return daysFrom(today(), n); }
+function dowOf(date) {
+  const [y, m, d] = String(date).slice(0, 10).split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).getUTCDay();                    // 0=Sun
+}
+function monthOf(date) { return Number(String(date).slice(5, 7)); }
+function hourNow() { return Number(zonedParts(TIME_PARTS).hour); }
+function timeNow() {
+  const p = zonedParts(TIME_PARTS);
+  return `${p.hour}:${p.minute}`;
+}
 function safeJSON(s, fallback) { try { return JSON.parse(s || ''); } catch { return fallback; } }
 function logHistory(uid, entity, id, action, detail, byAI = 0, undoable = '') {
   db.prepare('INSERT INTO history (user_id, entity, entity_id, action, detail, by_ai, undoable) VALUES (?, ?, ?, ?, ?, ?, ?)')
@@ -514,7 +540,7 @@ async function buildContext(uid, date = today()) {
 
   return {
     date, dow: dowOf(date), month: monthOf(date),
-    hour: new Date().getHours(),
+    hour: hourNow(),
     locations: locs, here, hereKey,
     activeTrip, upcomingTrip,
     weather, events, eventKinds, hostingSoon,
@@ -935,7 +961,7 @@ app.get('/api/views/now', async (req, res) => {
   const ctx = await buildContext(uid, date);
   const p = partitionItems(uid, ctx);
   const routines = await activeRoutines(uid, date, ctx);
-  const hour = new Date().getHours();
+  const hour = hourNow();
 
   const timely = routines.filter((r) => {
     if (r.complete) return false;
@@ -947,7 +973,7 @@ app.get('/api/views/now', async (req, res) => {
 
   // ctx.events already merges her iCloud appointments with Sage's own.
   p.events = ctx.events;
-  const nextEvent = p.events.find((e) => !e.event_start || e.event_start.slice(11) >= new Date().toTimeString().slice(0, 5)) || p.events[0] || null;
+  const nextEvent = p.events.find((e) => !e.event_start || e.event_start.slice(11) >= timeNow()) || p.events[0] || null;
   const immediate = [...p.overdue, ...p.dueToday].sort((a, b) => scoreItem(b) - scoreItem(a)).slice(0, 6);
   const weightToday = db.prepare("SELECT * FROM tracking WHERE user_id = ? AND kind = 'weight' AND date = ?").get(uid, date) || null;
 
@@ -1242,7 +1268,7 @@ function selectContext(uid, ctx, { text = '', budget = 24, routines = [] } = {})
 
   return {
     today: t,
-    dayOfWeek: new Date(t + 'T12:00').toLocaleDateString('en-US', { weekday: 'long' }),
+    dayOfWeek: new Date(`${t}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'UTC' }),
     here: ctx.hereKey,
     weather: weatherMatters ? { high: ctx.weather.todayHigh, low: ctx.weather.todayLow, rain: ctx.weather.todayRain } : undefined,
     appointmentsToday: (ctx.events || []).map((e) => ({ title: e.title, at: e.event_start || 'all day', kind: e.event_kind || undefined })),
