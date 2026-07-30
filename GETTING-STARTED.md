@@ -127,6 +127,11 @@ simply true about your life — a decision you reached, a preference, why
 something matters — as opposed to things you have to do. Everything Sage
 knows is listed there, and you can change or delete any of it.
 
+**When Sage doesn't sound right** — **More → Settings → 🗣️ How Sage talks to
+you**. Write it however you'd say it: *"be blunter with me"*, *"stop
+reassuring me"*, *"shorter answers"*, *"more warmth in the morning"*. Your
+words win. It changes tone only — the rules that keep Sage honest stay put.
+
 **When Sage gets something wrong** — open the item and say what's wrong in
 the box at the top: *"that isn't urgent, leave it until September"* or
 *"that's for the lake."* No forms, no categories to learn.
