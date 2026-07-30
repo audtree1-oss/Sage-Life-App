@@ -44,6 +44,12 @@ data and no business logic.
   *"I paid Terminix."* Sage classifies it against everything already stored,
   shows what it understood, and saves only what she approves. Obvious,
   low-risk updates come pre-checked; anything consequential does not.
+- **🤖 Her ChatGPT Sage can look in here** — she talks to a Sage in ChatGPT
+  too, so that one can now see what's actually going on: what's on today, her
+  routines, her projects, what Sage remembers. Connected as a custom GPT
+  Action with its own revocable key. **Read-only by construction** — there is
+  no write path on those routes at all. Changing anything still happens in the
+  app, where she approves it.
 - **🕐 A home screen** — Now leads with the time and date, live, in Sage's own
   timezone. Staying signed in is the point: the session slides forward every
   time she opens the app, so it never logs her out from under her.
