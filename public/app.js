@@ -1237,6 +1237,12 @@ async function renderICloudBox() {
             <div class="body"><div class="title" style="font-weight:500">${esc(l.name)}</div>
             ${l.last_error ? `<div class="quiet" style="color:var(--alert);font-size:.82em">${esc(l.last_error)}</div>` : ''}</div>
           </label>`).join('') || '<div class="quiet" style="margin-top:4px">No Apple reminder lists were exposed by this iCloud connection.</div>'}
+        ${s.reminder_lists.some((l) => /⚠/.test(l.name || '')) ? `
+        <div class="quiet" style="margin-top:8px;font-size:.82em">
+          The ⚠️ in those names came from Apple, not from you — iCloud marks a list that way when it
+          won't share it properly with other apps. If a list is full on your phone but looks empty
+          here, that is why. Nothing is wrong with the list itself, and you can untick any of these.
+        </div>` : ''}
       </div>
       <div class="btn-row" style="margin-top:10px">
         <button class="btn ghost small" id="ic-probe">What did Apple send?</button>

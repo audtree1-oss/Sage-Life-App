@@ -213,13 +213,21 @@ function parseCollections(xmlText, homeUrl, considered) {
     const supportsTodos = /name=["']?VTODO["']?/i.test(comps);
     if (!supportsEvents && !supportsTodos) { note(`holds neither events nor reminders (${comps.replace(/\s+/g, ' ').trim().slice(0, 120) || 'none listed'})`); continue; }
     note('');
-    // Some collections come back with no name, or with a literal "null" that a
-    // third-party app wrote years ago. Neither is a name a person can act on.
-    // A name that merely *contains* those words is hers, and stays untouched.
-    const nameless = !rawName || /^(null|undefined)$/i.test(rawName);
+    // iCloud writes a warning sign into the display name of a collection it
+    // won't share properly with other apps — the name arrives as "Reminders ⚠️"
+    // even though nothing on her phone says that. It is Apple's mark, not hers,
+    // so it's kept (she should see what iCloud says) and explained in Settings.
+    const flagged = /\u26a0/i.test(rawName);
+    const core = rawName.replace(/\u26a0\ufe0f?/gi, '').trim();
+    // Some collections come back with no name at all, or a literal "null" left
+    // behind by an app years ago. Neither is a name a person can act on. A name
+    // that merely *contains* those words is hers, and stays untouched.
+    const nameless = !core || /^(null|undefined)$/i.test(core);
+    const fallback = (supportsTodos && !supportsEvents ? 'Unnamed list' : 'Unnamed calendar') + (flagged ? ' \u26a0\ufe0f' : '');
     out.push({
       url: resolve(homeUrl, href),
-      name: nameless ? (supportsTodos && !supportsEvents ? 'Unnamed list' : 'Unnamed calendar') : rawName,
+      name: nameless ? fallback : rawName,
+      flagged,
       color: (decodeEntities(firstValue(block, 'calendar-color')) || '').slice(0, 9),
       supportsEvents,
       supportsTodos,
