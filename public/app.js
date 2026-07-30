@@ -9,6 +9,33 @@
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+function linkify(text) {
+  const source = String(text ?? '');
+  const pattern = /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<]+)/gi;
+  let html = '';
+  let last = 0;
+  for (const match of source.matchAll(pattern)) {
+    html += esc(source.slice(last, match.index));
+    let url = match[2] || match[3];
+    let suffix = '';
+    if (!match[2]) {
+      const trailing = url.match(/[.,!?;:)]+$/);
+      if (trailing) {
+        suffix = trailing[0];
+        url = url.slice(0, -suffix.length);
+      }
+    }
+    try {
+      const parsed = new URL(url);
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('unsafe protocol');
+      html += `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(match[1] || url)}</a>${esc(suffix)}`;
+    } catch {
+      html += esc(match[0]);
+    }
+    last = match.index + match[0].length;
+  }
+  return html + esc(source.slice(last));
+}
 const today = () => {
   const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
@@ -1365,7 +1392,7 @@ function openAsk() {
     if (!text) return;
     $('#ask-out', m).innerHTML = '<div class="empty">Thinking…</div>';
     const { answer } = await api('/api/ask', { method: 'POST', body: { text } });
-    $('#ask-out', m).innerHTML = `<div class="card" style="margin-top:14px;white-space:pre-wrap">${esc(answer)}</div>`;
+    $('#ask-out', m).innerHTML = `<div class="card" style="margin-top:14px;white-space:pre-wrap">${linkify(answer)}</div>`;
   };
   $('#ask-go', m).onclick = go;
   $('#ask-q', m).addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
