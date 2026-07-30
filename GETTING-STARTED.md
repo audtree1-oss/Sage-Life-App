@@ -149,7 +149,9 @@ of it. Useful in the first weeks while you're deciding whether to trust it.
 | Problem | Try this |
 |---|---|
 | Can't sign in | The password is the one you set at step 3. There's no reset link — that's the tradeoff of a private single-account app. |
-| Capture is very literal | `AI_API_KEY` isn't set, or is wrong. Check Render → Environment. |
+| Capture is very literal | `AI_API_KEY` isn't set, or was refused. **More → Settings → Thinking layer** says which, in plain words. |
+| "The key was refused" but you're sure it's right | You probably are right — a pasted key often carries an invisible trailing newline or space. Sage now strips those automatically, so re-paste it and save. |
+| "Out of credit" | The key is fine; the provider account needs funds. Settings → Thinking layer links straight to billing. |
 | Weather isn't showing | The coordinates for your places may need adjusting (More → Settings → Places). |
 | Calendar dates aren't appearing | Subscribed calendars refresh slowly. Give it a few hours. |
 | App seems asleep on first open | Render's starter plan sleeps when idle; the first open takes a few seconds. |
