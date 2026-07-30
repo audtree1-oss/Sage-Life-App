@@ -2639,6 +2639,8 @@ async function syncCalendars(uid, { force = false } = {}) {
   const seen = new Set();
   const seenReminders = new Set();
   const errors = [];
+  const okCals = new Set();      // sources that answered cleanly this round
+  const okLists = new Set();
   const insEvent = db.prepare(`INSERT INTO cal_events (user_id, calendar_id, uid, title, start, end, all_day, location, event_kind)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(user_id, uid) DO UPDATE SET title = excluded.title, start = excluded.start,
@@ -2690,13 +2692,30 @@ async function syncCalendars(uid, { force = false } = {}) {
         const upsertList = db.prepare(`INSERT INTO reminder_lists (user_id, url, name, color) VALUES (?, ?, ?, ?)
           ON CONFLICT(user_id, url) DO UPDATE SET name = excluded.name, color = excluded.color`);
         for (const list of lists) upsertList.run(uid, list.url, list.name, list.color);
+        // One difficult collection — a stale list, a shared calendar that has
+        // gone away — must not take the rest of her day down with it. Each is
+        // fetched on its own and remembers its own failure.
         const enabled = db.prepare("SELECT * FROM cal_calendars WHERE user_id = ? AND enabled = 1 AND kind = 'caldav'").all(uid);
         for (const cal of enabled) {
-          store(cal.id, await caldav.fetchEvents(cal.url, acct.apple_id, password, from, to));
+          try {
+            store(cal.id, await caldav.fetchEvents(cal.url, acct.apple_id, password, from, to));
+            okCals.add(cal.id);
+            db.prepare("UPDATE cal_calendars SET last_error = '' WHERE id = ?").run(cal.id);
+          } catch (e) {
+            errors.push(`${cal.name}: ${e.message}`);
+            db.prepare('UPDATE cal_calendars SET last_error = ? WHERE id = ?').run(String(e.message).slice(0, 300), cal.id);
+          }
         }
         const enabledLists = db.prepare('SELECT * FROM reminder_lists WHERE user_id = ? AND enabled = 1').all(uid);
         for (const list of enabledLists) {
-          storeReminders(list.id, await caldav.fetchTodos(list.url, acct.apple_id, password));
+          try {
+            storeReminders(list.id, await caldav.fetchTodos(list.url, acct.apple_id, password));
+            okLists.add(list.id);
+            db.prepare("UPDATE reminder_lists SET last_error = '' WHERE id = ?").run(list.id);
+          } catch (e) {
+            errors.push(`${list.name}: ${e.message}`);
+            db.prepare('UPDATE reminder_lists SET last_error = ? WHERE id = ?').run(String(e.message).slice(0, 300), list.id);
+          }
         }
         db.prepare("UPDATE cal_account SET last_sync = datetime('now'), last_error = '' WHERE user_id = ?").run(uid);
       } catch (e) {
@@ -2712,6 +2731,7 @@ async function syncCalendars(uid, { force = false } = {}) {
     try {
       const { events, name } = await caldav.fetchFeed(feed.url, from, to);
       store(feed.id, events);
+      okCals.add(feed.id);
       db.prepare("UPDATE cal_calendars SET last_error = '', name = ? WHERE id = ?")
         .run(feed.name && feed.name !== 'Calendar' ? feed.name : (name || feed.name), feed.id);
     } catch (e) {
@@ -2720,17 +2740,16 @@ async function syncCalendars(uid, { force = false } = {}) {
     }
   }
 
-  // Only prune when nothing failed — a source that errored this round has no
-  // events in `seen`, and its appointments must not vanish from her day.
-  if (!errors.length) {
-    const stale = db.prepare('SELECT uid FROM cal_events WHERE user_id = ?').all(uid)
-      .map((r) => r.uid).filter((u) => !seen.has(u));
-    const del = db.prepare('DELETE FROM cal_events WHERE user_id = ? AND uid = ?');
-    for (const u of stale) del.run(uid, u);
-    const staleReminders = db.prepare('SELECT list_id, uid FROM external_reminders WHERE user_id = ?').all(uid)
-      .filter((r) => !seenReminders.has(`${r.list_id}::${r.uid}`));
-    const delReminder = db.prepare('DELETE FROM external_reminders WHERE user_id = ? AND list_id = ? AND uid = ?');
-    for (const r of staleReminders) delReminder.run(uid, r.list_id, r.uid);
+  // Prune only inside the sources that answered cleanly. A source that failed
+  // has nothing in `seen` this round, and its appointments must not vanish from
+  // her day just because a different list was having a bad morning.
+  const del = db.prepare('DELETE FROM cal_events WHERE user_id = ? AND uid = ?');
+  for (const row of db.prepare('SELECT uid, calendar_id FROM cal_events WHERE user_id = ?').all(uid)) {
+    if (okCals.has(row.calendar_id) && !seen.has(row.uid)) del.run(uid, row.uid);
+  }
+  const delReminder = db.prepare('DELETE FROM external_reminders WHERE user_id = ? AND list_id = ? AND uid = ?');
+  for (const row of db.prepare('SELECT list_id, uid FROM external_reminders WHERE user_id = ?').all(uid)) {
+    if (okLists.has(row.list_id) && !seenReminders.has(`${row.list_id}::${row.uid}`)) delReminder.run(uid, row.list_id, row.uid);
   }
 
   db.prepare(`INSERT INTO preferences (user_id, key, value) VALUES (?, 'cal_last_sync', ?)

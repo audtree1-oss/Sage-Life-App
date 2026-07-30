@@ -1234,7 +1234,8 @@ async function renderICloudBox() {
         ${s.reminder_lists.map((l) => `
           <label class="row flat" style="align-items:center;cursor:pointer">
             <input type="checkbox" data-rem-list="${l.id}" ${l.enabled ? 'checked' : ''} style="transform:scale(1.25)">
-            <div class="body"><div class="title" style="font-weight:500">${esc(l.name)}</div></div>
+            <div class="body"><div class="title" style="font-weight:500">${esc(l.name)}</div>
+            ${l.last_error ? `<div class="quiet" style="color:var(--alert);font-size:.82em">${esc(l.last_error)}</div>` : ''}</div>
           </label>`).join('') || '<div class="quiet" style="margin-top:4px">No Apple reminder lists were exposed by this iCloud connection.</div>'}
       </div>
       <button class="btn danger small" id="ic-off" style="margin-top:8px">Disconnect iCloud</button>
