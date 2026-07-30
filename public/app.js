@@ -1210,6 +1210,13 @@ async function makeGptKey(schemaUrl) {
   $('#gpt-done', m).onclick = () => { closeModal(); renderGptBox(); };
 }
 
+// Connected and actually sending something are different questions, and the
+// second is the one she is really asking when a list looks wrong.
+function arrived(n, noun) {
+  if (!n) return 'nothing came through';
+  return `${n} ${noun}${n === 1 ? '' : 's'}`;
+}
+
 async function renderICloudBox() {
   const box = $('#icloud-box');
   if (!box) return;
@@ -1226,7 +1233,8 @@ async function renderICloudBox() {
         ${s.calendars.map((c) => `
           <label class="row flat" style="align-items:center;cursor:pointer">
             <input type="checkbox" data-cal="${c.id}" ${c.enabled ? 'checked' : ''} style="transform:scale(1.25)">
-            <div class="body"><div class="title" style="font-weight:500">${esc(c.name)}</div></div>
+            <div class="body"><div class="title" style="font-weight:500">${esc(c.name)}</div>
+            <div class="quiet" style="font-size:.82em">${c.enabled ? arrived(c.items, 'appointment') : 'not being read'}</div></div>
           </label>`).join('') || '<span class="quiet">No calendars found yet.</span>'}
       </div>
       <div style="margin-top:12px">
@@ -1235,6 +1243,7 @@ async function renderICloudBox() {
           <label class="row flat" style="align-items:center;cursor:pointer">
             <input type="checkbox" data-rem-list="${l.id}" ${l.enabled ? 'checked' : ''} style="transform:scale(1.25)">
             <div class="body"><div class="title" style="font-weight:500">${esc(l.name)}</div>
+            <div class="quiet" style="font-size:.82em">${l.enabled ? arrived(l.items, 'reminder') : 'not being read'}</div>
             ${l.last_error ? `<div class="quiet" style="color:var(--alert);font-size:.82em">${esc(l.last_error)}</div>` : ''}</div>
           </label>`).join('') || '<div class="quiet" style="margin-top:4px">No Apple reminder lists were exposed by this iCloud connection.</div>'}
         ${s.reminder_lists.some((l) => /⚠/.test(l.name || '')) ? `
