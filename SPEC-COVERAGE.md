@@ -257,6 +257,43 @@ when she raises the curtains, they reach Sage tagged with what they're waiting
 on, while never appearing in her actionable work unprompted. The behaviour was
 correct; the prompt was describing it too strictly.
 
+## The morning hour
+
+Sage (the GPT) raised this after talking with Regena about her mornings, and
+it is the sharpest design note in the whole build:
+
+> For over 40 years, mornings weren't hers. They belonged to the clock… The
+> temptation with an intelligent assistant is to greet her every morning with
+> *here are your tasks, here are your reminders, here are your priorities.*
+> But for her, that would be taking one of the best gifts of retirement and
+> replacing it with another commute — just a digital one.
+
+He was right, and the app was doing exactly that: greeting, then straight
+into appointments and a task list.
+
+Before 10am, **Now opens with presence instead**. Her name, one true line
+about what the morning is actually doing outside, and:
+
+> *This time belongs to you. There's nothing you need to do right now.*
+
+The day is one tap away — *"When you're ready, let's look at the day →"* — and
+once she opens it, it stays open for the rest of that day. Weight logging
+stays, because that greeting is her own ritual. It can be switched off
+entirely with the `gentle_mornings` preference.
+
+**Two things it will not do.** It will not hide something that would make her
+late: an appointment inside three hours is said plainly, with its lead time,
+followed by *"Nothing else needs you yet."* And it will not invent
+atmosphere. Sage cannot see the feeder, so it never claims the hummingbirds
+have arrived — it says what it actually knows, which is the weather and where
+she is.
+
+**Bug found here and fixed:** the "how long until this?" calculation compared
+her wall-clock appointment against the *server's* clock. The server is in a
+different timezone from Evans, so a 9:30 appointment read as almost three
+hours in the past and was silently dropped from the morning. Both clocks are
+now Sage's own.
+
 ## Not in Sage, on purpose
 
 Per §22 and §18: no passwords or security answers, no account or financial

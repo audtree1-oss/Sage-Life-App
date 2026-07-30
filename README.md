@@ -44,6 +44,13 @@ data and no business logic.
   *"I paid Terminix."* Sage classifies it against everything already stored,
   shows what it understood, and saves only what she approves. Obvious,
   low-risk updates come pre-checked; anything consequential does not.
+- **The morning hour** — before 10am, Now opens with presence rather than
+  productivity: her name, what the weather is actually doing, and *"this time
+  belongs to you; there's nothing you need to do right now."* The day is one
+  tap away when she wants it. For someone whose mornings belonged to a clock
+  for forty years, opening with a task list would just be a commute in a new
+  form. It still speaks up about anything inside three hours — being calm is
+  not the same as letting her be late.
 - **Now** — immediate items only, aimed at one iPhone screen. Next
   appointment, today's must-dos, and the routines that are actually relevant
   right now. Long checklists collapse to a line until tapped.
