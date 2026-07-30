@@ -216,3 +216,12 @@ input:focus, textarea:focus, select:focus { border-color: var(--sage); }
 .listening { animation: pulse 1.4s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: .55; } }
 @media (prefers-reduced-motion: reduce) { .listening { animation: none; } }
+
+/* ---------- thinking ---------- */
+.bubble {
+  border-radius: 16px; padding: 12px 15px; margin-bottom: 10px;
+  max-width: 88%; line-height: 1.5; box-shadow: var(--shadow); overflow-wrap: anywhere;
+}
+.bubble.her { background: var(--sage-deep); color: #fff; margin-left: auto; border-bottom-right-radius: 5px; }
+.bubble.sage { background: var(--card); border: 1px solid var(--line); border-bottom-left-radius: 5px; }
+.bubble.pending { opacity: .65; }
