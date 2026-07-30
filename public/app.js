@@ -364,6 +364,7 @@ VIEWS.more = function renderMore() {
       <button class="more-tile" data-go="routines"><span>📋</span>Routines</button>
       <button class="more-tile" data-go="shopping"><span>🛒</span>Shopping</button>
       <button class="more-tile" data-go="notes"><span>📝</span>Notes</button>
+      <button class="more-tile" data-go="files"><span>📁</span>Files</button>
       <button class="more-tile" data-go="inbox"><span>📥</span>Recent captures</button>
       <button class="more-tile" data-go="settings"><span>⚙️</span>Settings</button>
     </div>`;
@@ -546,6 +547,89 @@ VIEWS.notes = async function renderNotes() {
     const all = await api('/api/items?type=note&status=open');
     const note = all.find((n) => n.id == el.dataset.noteOpen);
     if (note) openItem(note);
+  });
+  $('[data-back]').onclick = () => setView('more');
+};
+
+function fileSize(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function fileIcon(f) {
+  if (f.mime_type === 'application/pdf') return '📕';
+  if (f.mime_type.startsWith('image/')) return '🖼️';
+  if (/word/.test(f.mime_type)) return '📘';
+  if (/sheet|excel|csv/.test(f.mime_type)) return '📊';
+  return '📄';
+}
+
+VIEWS.files = async function renderFiles() {
+  const files = await api('/api/files');
+  $('#main').innerHTML = `
+    <h1>📁 Files</h1>
+    <p class="sub">Photos, PDFs, paperwork, and the things you absolutely put somewhere safe.</p>
+    <button class="btn small" id="file-new">＋ Add a file</button>
+    <div style="margin-top:12px">
+      ${files.length ? files.map((f) => `
+        <div class="card">
+          <div style="display:flex;gap:10px;align-items:flex-start">
+            <span style="font-size:1.35em">${fileIcon(f)}</span>
+            <div style="flex:1;min-width:0">
+              <b>${esc(f.title)}</b>
+              ${f.note ? `<div class="quiet" style="margin-top:3px">${esc(f.note)}</div>` : ''}
+              <div style="margin-top:6px">
+                <span class="pill grey">${esc(f.original_name)}</span>
+                <span class="pill grey">${fileSize(f.size_bytes)}</span>
+                ${f.related_item_title ? `<span class="pill grey">linked to ${esc(f.related_item_title)}</span>` : ''}
+                <span class="pill grey">from file upload</span>
+              </div>
+            </div>
+          </div>
+          <div class="btn-row" style="margin-top:10px">
+            <a class="btn ghost small" href="/files/${f.id}" target="_blank" rel="noopener">Open</a>
+            <button class="btn danger small" data-file-del="${f.id}">Delete</button>
+          </div>
+        </div>`).join('') : '<div class="empty">No files yet. The cabinet awaits its paperwork destiny.</div>'}
+    </div>
+    <button class="btn ghost small" data-back style="margin-top:16px">← More</button>`;
+  $('#file-new').onclick = async () => {
+    const items = await api('/api/items?status=open');
+    const m = openModal(`
+      <h2>📁 Add a file</h2>
+      <label class="field">Choose file</label>
+      <input type="file" id="file-pick" accept=".pdf,.jpg,.jpeg,.png,.heic,.heif,.webp,.txt,.csv,.doc,.docx,.xls,.xlsx">
+      <p class="quiet" style="margin:5px 0 0">PDF, photo, text, Word, or spreadsheet · up to 20 MB</p>
+      <label class="field">Name</label><input id="file-title" placeholder="Uses the filename if left blank">
+      <label class="field">Note</label><textarea id="file-note" style="min-height:80px" placeholder="What is this, and why are we keeping it?"></textarea>
+      <label class="field">Link to something in Sage (optional)</label>
+      <select id="file-related"><option value="">Nothing</option>
+        ${items.slice(0, 150).map((i) => `<option value="${i.id}">${esc(i.title)}</option>`).join('')}
+      </select>
+      <button class="btn big" id="file-save" style="margin-top:16px">Upload</button>`);
+    $('#file-save', m).onclick = async () => {
+      const picked = $('#file-pick', m).files[0];
+      if (!picked) return toast('Choose a file first.');
+      const form = new FormData();
+      form.append('file', picked);
+      form.append('title', $('#file-title', m).value);
+      form.append('note', $('#file-note', m).value);
+      form.append('related_item_id', $('#file-related', m).value);
+      const btn = $('#file-save', m);
+      btn.disabled = true; btn.textContent = 'Uploading…';
+      try {
+        await api('/api/files', { method: 'POST', body: form });
+        closeModal(); toast('Filed safely.'); setView('files');
+      } catch (e) {
+        btn.disabled = false; btn.textContent = 'Upload'; toast(e.message, 5000);
+      }
+    };
+  };
+  $$('[data-file-del]').forEach((b) => b.onclick = async () => {
+    if (!confirm('Delete this file from Sage? This cannot be undone.')) return;
+    await api(`/api/files/${b.dataset.fileDel}`, { method: 'DELETE' });
+    toast('File deleted.'); setView('files');
   });
   $('[data-back]').onclick = () => setView('more');
 };
