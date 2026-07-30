@@ -44,6 +44,10 @@ data and no business logic.
   *"I paid Terminix."* Sage classifies it against everything already stored,
   shows what it understood, and saves only what she approves. Obvious,
   low-risk updates come pre-checked; anything consequential does not.
+- **✨ Fireflies** — eleven of them drift and blink behind the morning
+  greeting, each on its own rhythm so they never pulse together. Pure CSS, no
+  timers, nothing to drain a phone that lives on a kitchen table. They vanish
+  entirely for anyone who prefers reduced motion. A surprise from Audrey.
 - **The morning hour** — before 10am, Now opens with presence rather than
   productivity: her name, what the weather is actually doing, and *"this time
   belongs to you; there's nothing you need to do right now."* The day is one

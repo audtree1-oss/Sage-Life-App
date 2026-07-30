@@ -361,6 +361,29 @@ function wireRoutines(root) {
 // ---------------------------------------------------------------------------
 // NOW — immediate items only, one screen where possible
 // ---------------------------------------------------------------------------
+// Fireflies over the morning greeting. Fixed positions rather than random
+// ones, so they're scattered by design instead of occasionally clumping in a
+// corner — but each gets its own drift, pulse rate and delay, so they never
+// blink together and the field never repeats in a way the eye can catch.
+const FIREFLY_FIELD = [
+  { x: 12, y: 18, dx: 34, dy: -46, dur: 27, pulse: 4.2, delay: 0.0 },
+  { x: 78, y: 12, dx: -28, dy: 38, dur: 31, pulse: 5.6, delay: 1.4 },
+  { x: 34, y: 62, dx: 44, dy: -30, dur: 24, pulse: 3.8, delay: 2.7 },
+  { x: 88, y: 48, dx: -40, dy: -34, dur: 34, pulse: 6.1, delay: 0.8 },
+  { x: 22, y: 82, dx: 30, dy: -52, dur: 29, pulse: 4.9, delay: 3.6 },
+  { x: 62, y: 74, dx: -34, dy: -28, dur: 26, pulse: 5.2, delay: 1.9 },
+  { x: 48, y: 32, dx: 26, dy: 40, dur: 33, pulse: 3.4, delay: 4.3 },
+  { x: 8, y: 46, dx: 38, dy: 32, dur: 28, pulse: 6.4, delay: 2.2 },
+  { x: 70, y: 90, dx: -30, dy: -44, dur: 30, pulse: 4.6, delay: 5.1 },
+  { x: 92, y: 74, dx: -36, dy: 26, dur: 25, pulse: 5.9, delay: 3.0 },
+  { x: 40, y: 8, dx: 22, dy: 48, dur: 32, pulse: 4.0, delay: 6.2 },
+];
+
+function fireflies() {
+  return `<div class="fireflies" aria-hidden="true">${FIREFLY_FIELD.map((f) => `
+    <span class="firefly" style="left:${f.x}%;top:${f.y}%;--dx:${f.dx}px;--dy:${f.dy}px;--dur:${f.dur}s;--pulse:${f.pulse}s;--delay:${f.delay}s"></span>`).join('')}</div>`;
+}
+
 // She can open the day whenever she likes; once she has, it stays open for
 // the rest of that day rather than making her tap through it again.
 function morningOpened(date) {
@@ -378,6 +401,7 @@ VIEWS.now = async function renderNow() {
   if (d.morning && !morningOpened(d.date)) {
     $('#main').innerHTML = `
       <div class="morning">
+        ${fireflies()}
         <h1>${d.greeting}, ${esc(ME.name.split(' ')[0])}.</h1>
         ${d.morning.notes.map((n) => `<p class="morning-note">${esc(n)}</p>`).join('')}
         ${d.morning.soon ? `

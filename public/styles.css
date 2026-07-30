@@ -244,3 +244,51 @@ input:focus, textarea:focus, select:focus { border-color: var(--sage); }
 }
 @keyframes morning-in { from { opacity: 0; transform: translateY(6px); } }
 @media (prefers-reduced-motion: reduce) { .morning { animation: none; } }
+
+/* ---------- fireflies ----------
+   A surprise from Audrey. They drift behind the morning greeting and pulse
+   at their own rates, so the screen is never quite still and never busy
+   either. Pure CSS: no timers, no canvas, nothing to drain a battery on a
+   phone that sits open on a kitchen table.
+
+   Kept deliberately faint. The morning screen's whole job is calm, and
+   anything that pulls the eye would undo it. */
+.fireflies {
+  position: absolute; inset: 0; overflow: hidden;
+  pointer-events: none; z-index: 0;
+  border-radius: 22px;
+}
+.firefly {
+  position: absolute;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--fly);
+  /* Two layers: a tight core and a wide soft halo. One alone reads as a dot
+     or as a smudge; together they read as something glowing. */
+  box-shadow: 0 0 5px 1px var(--fly-glow), 0 0 14px 5px var(--fly-halo);
+  opacity: 0;
+  animation: fly-drift var(--dur, 26s) ease-in-out infinite alternate,
+             fly-glow var(--pulse, 4.5s) ease-in-out infinite;
+  animation-delay: var(--delay, 0s), var(--delay, 0s);
+}
+/* Warm amber in daylight — a yellow-green dot disappears against a pale
+   sage background. Cooler and brighter at night, where it can breathe. */
+:root { --fly: #e8a53a; --fly-glow: rgba(232, 165, 58, .6); --fly-halo: rgba(232, 165, 58, .22); }
+:root[data-theme="dark"] { --fly: #f6f2b0; --fly-glow: rgba(246, 242, 176, .55); --fly-halo: rgba(226, 236, 130, .2); }
+
+@keyframes fly-glow {
+  0%, 100% { opacity: 0; }
+  30%      { opacity: 1; }
+  48%      { opacity: .3; }
+  66%      { opacity: .85; }
+  82%      { opacity: .15; }
+}
+@keyframes fly-drift {
+  from { transform: translate(0, 0); }
+  to   { transform: translate(var(--dx, 40px), var(--dy, -50px)); }
+}
+/* Stillness is a valid preference, and this is meant to be restful. */
+@media (prefers-reduced-motion: reduce) {
+  .fireflies { display: none; }
+}
+.morning { position: relative; }
+.morning > *:not(.fireflies) { position: relative; z-index: 1; }
