@@ -757,6 +757,9 @@ async function askAI(system, user, { maxTokens = 1200, json = false, tier = 'fas
       body = {
         model, max_completion_tokens: maxTokens,
         messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+        // GPT-5's completion budget includes its invisible reasoning tokens.
+        // Low effort leaves room for the short, visible answers Sage needs.
+        ...(/^gpt-5/i.test(model) ? { reasoning_effort: 'low' } : {}),
         ...(json ? { response_format: { type: 'json_object' } } : {}),
       };
     } else {
@@ -1921,9 +1924,12 @@ app.post('/api/ask', async (req, res) => {
     `Question: "${question}"\n\nWhat is relevant right now:\n${JSON.stringify(selectContext(uid, ctx, { text: question, budget: 30, routines }))}`,
     // The thinking-partner path always gets the better model. This is where
     // "do you think you're rationalizing here?" either lands or doesn't.
-    { maxTokens: 700, tier: 'smart' },
+    { maxTokens: 1600, tier: 'smart' },
   );
-  res.json({ answer: answer || 'The AI layer is not configured, so I can only show you what is stored — try the Today view.' });
+  res.json({
+    answer: answer || 'Sage is connected, but the model did not return an answer that time. Please try asking again.',
+    working: !!answer,
+  });
 });
 
 // ---------------------------------------------------------------------------
