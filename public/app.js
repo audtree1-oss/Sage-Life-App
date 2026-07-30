@@ -139,23 +139,38 @@ function itemPills(i) {
   if (i.effort_min) out.push(`<span class="pill grey">${i.effort_min} min</span>`);
   if (i.location) out.push(`<span class="pill grey">${esc(i.location)}</span>`);
   if (i.store) out.push(`<span class="pill grey">${esc(i.store)}</span>`);
+  if (i.source) out.push(`<span class="pill grey">from ${esc(sourceLabel(i))}</span>`);
   for (const b of (i.blockers || [])) out.push(`<span class="pill grey">${esc(b)}</span>`);
   return out.join('');
+}
+
+function sourceLabel(i) {
+  if (i.source_label) return i.source_label;
+  return ({
+    seed: 'Sage’s starter context',
+    voice: 'voice capture',
+    typed: 'Sage capture',
+    ai: 'Sage',
+    manual: 'Sage',
+  })[i.source] || i.source || 'Sage';
 }
 
 function itemRow(i, { flat = false } = {}) {
   // Appointments read from her iCloud calendar are shown, never edited —
   // Apple Calendar stays the system of record. No checkbox, no edit sheet.
   if (i.external) {
+    const reminder = i.external_kind === 'reminder';
     return `
       <div class="row ${flat ? 'flat' : ''} external">
-        <span style="font-size:1.2em;margin-top:1px">📅</span>
+        <span style="font-size:1.2em;margin-top:1px">${reminder ? '⏰' : '📅'}</span>
         <div class="body">
           <div class="title">${esc(i.title)}</div>
-          <div>${i.all_day ? '<span class="pill info">all day</span>'
-              : `<span class="pill info">${esc(fmtTime(i.event_start) || fmtDate(i.due_at))}</span>`}
+          <div>${reminder
+              ? (i.due_at ? `<span class="pill info">${esc(fmtDate(i.due_at))}</span>` : '')
+              : (i.all_day ? '<span class="pill info">all day</span>'
+              : `<span class="pill info">${esc(fmtTime(i.event_start) || fmtDate(i.due_at))}</span>`)}
             ${i.location ? `<span class="pill grey">${esc(i.location)}</span>` : ''}
-            <span class="pill grey">your calendar</span></div>
+            <span class="pill grey">from ${esc(sourceLabel(i))}</span></div>
         </div>
       </div>`;
   }
@@ -258,6 +273,7 @@ VIEWS.now = async function renderNow() {
     ${undoable ? `<div class="strip">🌿 Sage ${esc(undoable.action)} “${esc(undoable.detail)}”<button class="btn small ghost" data-undo="${undoable.id}">Undo</button></div>` : ''}
     ${bits.join('')}
     ${d.immediate.length ? `<div id="now-items">${d.immediate.map((i) => itemRow(i)).join('')}</div>` : ''}
+    ${d.reminders.length ? `<h2>⏰ Apple Reminders</h2>${d.reminders.map((i) => itemRow(i)).join('')}` : ''}
     <div id="now-routines">${d.routines.map((r) => routineBlock(r, { collapsed: r.steps.length > 3 })).join('')}</div>
     ${!d.immediate.length && !d.routines.length && !bits.length ? '<div class="empty">Clear. Genuinely clear.</div>' : ''}
     ${!d.weightToday ? `<div class="card"><b>Weight today?</b><div class="btn-row" style="margin-top:8px">
@@ -298,6 +314,7 @@ VIEWS.today = async function renderToday() {
     <h1>Today</h1>
     <p class="sub">${new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}${d.weather ? ` · ${d.weather.todayHigh}°/${d.weather.todayLow}°` : ''}</p>
     ${sect('📅 Appointments', d.events)}
+    ${sect('⏰ Apple Reminders', d.reminders)}
     ${sect('Must do', d.must)}
     ${sect('Should do', d.should)}
     <h2>Routines</h2>
@@ -501,7 +518,8 @@ VIEWS.inbox = async function renderInbox() {
       <div class="row" data-item="${i.id}">
         <div class="body" data-open="${i.id}">
           <div class="title">${esc(i.title)}</div>
-          <div class="meta">${esc(TYPES[i.type] || i.type)} · ${esc(IMPORTANCE[i.importance] || '')} · ${fmtDate(i.created_at.slice(0, 10))}${i.status === 'done' ? ' · done' : ''}</div>
+          <div class="meta">${esc(TYPES[i.type] || i.type)} · ${esc(IMPORTANCE[i.importance] || '')} ·
+            from ${esc(sourceLabel(i))} · ${fmtDate(i.created_at.slice(0, 10))}${i.status === 'done' ? ' · done' : ''}</div>
           ${i.raw_capture && i.raw_capture !== i.title ? `<div class="quiet" style="margin-top:3px">you said: “${esc(i.raw_capture)}”</div>` : ''}
         </div>
         <span class="chev">›</span>
@@ -581,7 +599,9 @@ VIEWS.settings = async function renderSettings() {
 async function renderICloudBox() {
   const box = $('#icloud-box');
   if (!box) return;
-  const s = await api('/api/calendar/status').catch(() => ({ connected: false, icloud: { connected: false }, calendars: [], feeds: [] }));
+  const s = await api('/api/calendar/status').catch(() => ({
+    connected: false, icloud: { connected: false }, calendars: [], feeds: [], reminder_lists: [], reminder_count: 0,
+  }));
   const when = s.last_sync ? fmtDate(s.last_sync.slice(0, 10)) : 'not yet';
 
   const icloudCard = s.icloud.connected ? `
@@ -594,6 +614,14 @@ async function renderICloudBox() {
             <input type="checkbox" data-cal="${c.id}" ${c.enabled ? 'checked' : ''} style="transform:scale(1.25)">
             <div class="body"><div class="title" style="font-weight:500">${esc(c.name)}</div></div>
           </label>`).join('') || '<span class="quiet">No calendars found yet.</span>'}
+      </div>
+      <div style="margin-top:12px">
+        <b>⏰ Reminder lists</b>
+        ${s.reminder_lists.map((l) => `
+          <label class="row flat" style="align-items:center;cursor:pointer">
+            <input type="checkbox" data-rem-list="${l.id}" ${l.enabled ? 'checked' : ''} style="transform:scale(1.25)">
+            <div class="body"><div class="title" style="font-weight:500">${esc(l.name)}</div></div>
+          </label>`).join('') || '<div class="quiet" style="margin-top:4px">No Apple reminder lists were exposed by this iCloud connection.</div>'}
       </div>
       <button class="btn danger small" id="ic-off" style="margin-top:8px">Disconnect iCloud</button>
     </div>` : `
@@ -624,7 +652,7 @@ async function renderICloudBox() {
       <button class="btn small" id="feed-add">Add a calendar link</button>
     </div>
     ${s.connected ? `<div class="btn-row"><button class="btn quietbtn small" id="ic-sync">Check for changes now</button></div>
-      <p class="quiet" style="margin-top:8px">${s.event_count} appointment${s.event_count === 1 ? '' : 's'} · last checked ${esc(when)}</p>` : ''}`;
+      <p class="quiet" style="margin-top:8px">${s.event_count} appointment${s.event_count === 1 ? '' : 's'} · ${s.reminder_count || 0} open reminder${s.reminder_count === 1 ? '' : 's'} · last checked ${esc(when)}</p>` : ''}`;
 
   if ($('#ic-connect')) $('#ic-connect').onclick = openICloudConnect;
   if ($('#feed-add')) $('#feed-add').onclick = openFeedConnect;
@@ -632,7 +660,7 @@ async function renderICloudBox() {
     $('#ic-sync').disabled = true;
     $('#ic-sync').textContent = 'Checking…';
     const r = await api('/api/calendar/sync', { method: 'POST' });
-    toast(r.errors && r.errors.length ? r.errors[0] : `Up to date — ${r.events || 0} appointments.`, 5000);
+    toast(r.errors && r.errors.length ? r.errors[0] : `Up to date — ${r.events || 0} appointments and ${r.reminders || 0} reminders.`, 5000);
     renderICloudBox();
   };
   if ($('#ic-off')) $('#ic-off').onclick = async () => {
@@ -643,6 +671,11 @@ async function renderICloudBox() {
   };
   $$('[data-cal]', box).forEach((cb) => cb.onchange = async () => {
     await api(`/api/calendar/calendars/${cb.dataset.cal}`, { method: 'PATCH', body: { enabled: cb.checked } });
+    if (cb.checked) await api('/api/calendar/sync', { method: 'POST' });
+    renderICloudBox();
+  });
+  $$('[data-rem-list]', box).forEach((cb) => cb.onchange = async () => {
+    await api(`/api/reminders/lists/${cb.dataset.remList}`, { method: 'PATCH', body: { enabled: cb.checked } });
     if (cb.checked) await api('/api/calendar/sync', { method: 'POST' });
     renderICloudBox();
   });
