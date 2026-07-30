@@ -45,6 +45,9 @@ const today = () => {
 
 const TYPES = { task: '✓ Task', event: '📅 Event', project: '🎯 Project', opportunity: '🌱 Opportunity', shopping: '🛒 Shopping', note: '📝 Note' };
 const IMPORTANCE = { must: 'Must do', should: 'Should do', opportunity: 'Opportunity', someday: 'Someday' };
+// Things that come back round rather than being finished once.
+const REPEATS = { '': 'Does not repeat', weekly: 'Every week', monthly: 'Every month', quarterly: 'Every 3 months', yearly: 'Every year' };
+const REPEAT_PILL = { weekly: 'weekly', monthly: 'monthly', quarterly: 'every 3 months', yearly: 'yearly' };
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -245,6 +248,7 @@ function itemPills(i) {
     out.push(`<span class="pill ${day < t ? 'late' : day === t ? 'soon' : ''}">${day < t ? 'was due ' : ''}${fmtDate(day)}</span>`);
   }
   if (i.importance === 'must') out.push('<span class="pill soon">must</span>');
+  if (i.repeat_rule && REPEAT_PILL[i.repeat_rule]) out.push(`<span class="pill grey">↻ ${REPEAT_PILL[i.repeat_rule]}</span>`);
   if (i.target_window && !day) out.push(`<span class="pill grey">${esc(i.target_window)}</span>`);
   if (i.effort_min) out.push(`<span class="pill grey">${i.effort_min} min</span>`);
   if (i.location) out.push(`<span class="pill grey">${esc(i.location)}</span>`);
@@ -302,7 +306,8 @@ function wireItems(root) {
     if (tick) {
       const row = e.target.closest('.row');
       const wasDone = row.classList.contains('done');
-      await api(`/api/items/${tick}`, { method: 'PATCH', body: { status: wasDone ? 'open' : 'done' } });
+      const r = await api(`/api/items/${tick}`, { method: 'PATCH', body: { status: wasDone ? 'open' : 'done' } });
+      if (r && r.repeated) toast(`Done — back on ${fmtDate(r.next.slice(0, 10))}.`);
       setView(VIEW);
     } else if (open) {
       const list = await api('/api/items?q=');
@@ -1602,6 +1607,10 @@ function openItem(i) {
       <div style="flex:1"><label class="field">Due</label><input type="date" id="it-due" value="${esc((i.due_at || '').slice(0, 10))}"></div>
       <div style="flex:1"><label class="field">Not before</label><input type="date" id="it-win" value="${esc(i.window_start || '')}"></div>
     </div>
+    <label class="field">Comes back round</label>
+    <select id="it-repeat">${Object.entries(REPEATS).map(([v, l]) =>
+      `<option value="${v}" ${v === (i.repeat_rule || '') ? 'selected' : ''}>${l}</option>`).join('')}</select>
+    ${i.repeat_rule ? '<p class="quiet" style="font-size:.8em;margin-top:4px">Ticking this off moves it to the next date instead of finishing it.</p>' : ''}
     ${i.type !== 'project' ? `<label class="field">Project</label>
       <select id="it-project"><option value="0">No project</option></select>` : ''}
     ${i.type === 'project' ? `<label class="field">Next action</label><input type="text" id="it-next" value="${esc(i.next_action || '')}">
@@ -1634,6 +1643,7 @@ function openItem(i) {
       title: $('#it-title', m).value, note: $('#it-note', m).value,
       type: $('#it-type', m).value, importance: $('#it-imp', m).value,
       due_at: $('#it-due', m).value, window_start: $('#it-win', m).value,
+      repeat_rule: $('#it-repeat', m).value,
       ai_private: $('#it-private', m).checked,
     };
     if ($('#it-project', m)) body.project_id = parseInt($('#it-project', m).value, 10) || 0;
@@ -1642,8 +1652,10 @@ function openItem(i) {
     closeModal(); toast('Saved.'); setView(VIEW);
   };
   const setStatus = (status, msg) => async () => {
-    await api(`/api/items/${i.id}`, { method: 'PATCH', body: { status } });
-    closeModal(); toast(msg); setView(VIEW);
+    const r = await api(`/api/items/${i.id}`, { method: 'PATCH', body: { status } });
+    closeModal();
+    toast(r && r.repeated ? `Done — back on ${fmtDate(r.next.slice(0, 10))}.` : msg);
+    setView(VIEW);
   };
   if ($('#it-done', m)) $('#it-done', m).onclick = setStatus('done', 'Done.');
   if ($('#it-open', m)) $('#it-open', m).onclick = setStatus('open', 'Back on the list.');
