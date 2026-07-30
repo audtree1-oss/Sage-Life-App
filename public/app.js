@@ -972,6 +972,12 @@ VIEWS.settings = async function renderSettings() {
       <p style="margin:0 0 10px;font-size:.88em">Put Sage's dates on your real calendar, with real alerts on your phone and watch. Subscribe once; new dates flow in on their own.</p>
       <div class="btn-row"><a class="btn small" id="cal-sub" href="#">Subscribe on this phone</a>
       <button class="btn ghost small" id="cal-copy">Copy the link</button></div>
+      <label class="row flat" style="align-items:flex-start;cursor:pointer;margin-top:12px">
+        <input type="checkbox" id="cal-feed-tasks" style="transform:scale(1.25);margin-top:6px">
+        <div class="body"><div class="title" style="font-weight:500">Also send to-do items</div>
+        <div class="quiet" style="font-size:.82em">Off means appointments only — your calendar stays a calendar.
+        Your tasks are still in Sage either way.</div></div>
+      </label>
       <button class="btn danger small" id="cal-reset" style="margin-top:10px">Reset private calendar link</button>
     </div>
     <h2>📥 Your calendar → Sage</h2>
@@ -1037,6 +1043,17 @@ VIEWS.settings = async function renderSettings() {
     $('#cal-copy').onclick = async () => {
       await navigator.clipboard.writeText(`${location.origin}${path}`);
       toast('Copied. Paste it into any calendar app.');
+    };
+  }).catch(() => {});
+  api('/api/preferences').then((prefs) => {
+    const cb = $('#cal-feed-tasks');
+    if (!cb) return;
+    cb.checked = prefs.cal_feed_tasks === '1';
+    cb.onchange = async () => {
+      await api('/api/preferences', { method: 'POST', body: { cal_feed_tasks: cb.checked ? '1' : '0' } });
+      toast(cb.checked
+        ? 'To-do items will show on your calendar too.'
+        : 'Appointments only. The to-dos drop off next time your phone refreshes the calendar.', 6000);
     };
   }).catch(() => {});
   $('#cal-reset').onclick = async () => {
