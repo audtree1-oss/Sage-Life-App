@@ -1033,6 +1033,40 @@ app.get('/api/items', (req, res) => {
   res.json(db.prepare(sql).all(...args));
 });
 
+// One search door across Sage's stored rooms. File contents stay encrypted;
+// only their titles, filenames, and notes are indexed here.
+app.get('/api/search', (req, res) => {
+  const uid = req.user.id;
+  const q = String((req.query || {}).q || '').trim().slice(0, 100);
+  if (!q) return res.json({ query: '', items: [], files: [], events: [], reminders: [], routines: [], inventory: [] });
+  const like = `%${q.replace(/[\\%_]/g, '\\$&')}%`;
+  const matches = (fields) => fields.map((f) => `${f} LIKE ? ESCAPE '\\'`).join(' OR ');
+  const args = (n) => Array(n).fill(like);
+
+  const items = db.prepare(`SELECT * FROM items WHERE user_id = ? AND (${matches(['title', 'note', 'raw_capture', 'life_area', 'location'])})
+    ORDER BY CASE status WHEN 'open' THEN 0 WHEN 'waiting' THEN 1 ELSE 2 END, updated_at DESC LIMIT 60`)
+    .all(uid, ...args(5));
+  const files = db.prepare(`SELECT id, related_item_id, original_name, mime_type, size_bytes, title, note, source, created_at
+    FROM sage_files WHERE user_id = ? AND (${matches(['title', 'note', 'original_name'])})
+    ORDER BY created_at DESC LIMIT 25`).all(uid, ...args(3));
+  const events = db.prepare(`SELECT e.id, e.title, e.start, e.end, e.location, c.name AS source_label
+    FROM cal_events e LEFT JOIN cal_calendars c ON c.id = e.calendar_id
+    WHERE e.user_id = ? AND (${matches(['e.title', 'e.location', 'c.name'])})
+    ORDER BY e.start DESC LIMIT 40`).all(uid, ...args(3));
+  const reminders = db.prepare(`SELECT r.id, r.title, r.note, r.due, r.completed, l.name AS source_label
+    FROM external_reminders r LEFT JOIN reminder_lists l ON l.id = r.list_id
+    WHERE r.user_id = ? AND (${matches(['r.title', 'r.note', 'l.name'])})
+    ORDER BY r.completed, r.due DESC LIMIT 40`).all(uid, ...args(3));
+  const routines = db.prepare(`SELECT DISTINCT r.id, r.name, r.emoji, r.cadence_note
+    FROM routines r LEFT JOIN routine_steps s ON s.routine_id = r.id
+    WHERE r.user_id = ? AND r.active = 1 AND (${matches(['r.name', 'r.cadence_note', 's.text'])})
+    ORDER BY r.sort, r.name LIMIT 25`).all(uid, ...args(3));
+  const inventory = db.prepare(`SELECT id, name, location_key, state, store, note
+    FROM inventory WHERE user_id = ? AND (${matches(['name', 'location_key', 'store', 'note'])})
+    ORDER BY name LIMIT 25`).all(uid, ...args(4));
+  res.json({ query: q, items, files, events, reminders, routines, inventory });
+});
+
 app.post('/api/items', (req, res) => {
   const it = cleanItem(req.body || {});
   const cols = Object.keys(it);
