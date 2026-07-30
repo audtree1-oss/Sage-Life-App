@@ -225,3 +225,22 @@ input:focus, textarea:focus, select:focus { border-color: var(--sage); }
 .bubble.her { background: var(--sage-deep); color: #fff; margin-left: auto; border-bottom-right-radius: 5px; }
 .bubble.sage { background: var(--card); border: 1px solid var(--line); border-bottom-left-radius: 5px; }
 .bubble.pending { opacity: .65; }
+
+/* ---------- the morning hour ----------
+   Deliberately unlike every other screen: centred, airy, nothing in columns,
+   nothing to scan. It should feel like looking out of a window rather than
+   opening an app. */
+.morning {
+  text-align: center;
+  padding: 12vh 6px 0;
+  animation: morning-in .8s ease;
+}
+.morning h1 { font-size: 1.7em; margin-bottom: 18px; }
+.morning-note {
+  color: var(--ink-soft); font-size: 1.02em; margin: 6px 0; line-height: 1.6;
+}
+.morning-line {
+  margin: 26px auto 0; max-width: 21em; line-height: 1.65; font-size: 1.05em;
+}
+@keyframes morning-in { from { opacity: 0; transform: translateY(6px); } }
+@media (prefers-reduced-motion: reduce) { .morning { animation: none; } }

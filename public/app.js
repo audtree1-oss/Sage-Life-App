@@ -361,9 +361,48 @@ function wireRoutines(root) {
 // ---------------------------------------------------------------------------
 // NOW — immediate items only, one screen where possible
 // ---------------------------------------------------------------------------
+// She can open the day whenever she likes; once she has, it stays open for
+// the rest of that day rather than making her tap through it again.
+function morningOpened(date) {
+  try { return localStorage.getItem('sage_morning_opened') === date; } catch { return false; }
+}
+function openTheDay(date) {
+  try { localStorage.setItem('sage_morning_opened', date); } catch {}
+}
+
 VIEWS.now = async function renderNow() {
   const d = await api('/api/views/now');
   const wx = d.weather ? `${d.weather.tempNow}° ${d.weather.todayRain ? '🌧️' : '☀️'}` : '';
+
+  // The morning hour: presence first. Nothing here is a list.
+  if (d.morning && !morningOpened(d.date)) {
+    $('#main').innerHTML = `
+      <div class="morning">
+        <h1>${d.greeting}, ${esc(ME.name.split(' ')[0])}.</h1>
+        ${d.morning.notes.map((n) => `<p class="morning-note">${esc(n)}</p>`).join('')}
+        ${d.morning.soon ? `
+          <div class="card sky" style="margin-top:20px;text-align:left">
+            <b>${esc(d.morning.soon.title)}</b>
+            <div class="quiet">${esc(fmtTime(d.morning.soon.at))} — about ${esc(d.morning.soon.away)} from now${
+              d.morning.soon.prep_minutes ? `, and you'll want ${d.morning.soon.prep_minutes} minutes to get ready` : ''}.</div>
+          </div>
+          <p class="morning-line">Nothing else needs you yet.</p>`
+          : `<p class="morning-line">${esc(d.morning.line)}</p>`}
+        <button class="btn big quietbtn" id="m-open" style="margin-top:26px">When you're ready, let's look at the day →</button>
+        ${!d.weightToday ? `<div class="btn-row" style="justify-content:center;margin-top:6px">
+          <input type="text" inputmode="decimal" id="wt" placeholder="150.0" style="max-width:110px;text-align:center">
+          <button class="btn ghost small" id="wt-save">Log it</button></div>` : ''}
+      </div>`;
+    $('#m-open').onclick = () => { openTheDay(d.date); renderNow(); };
+    if ($('#wt-save')) $('#wt-save').onclick = async () => {
+      const v = $('#wt').value.trim();
+      if (!v) return;
+      await api('/api/tracking', { method: 'POST', body: { kind: 'weight', value: v } });
+      toast('Recorded.');
+    };
+    return;
+  }
+
   const undoable = (await api('/api/history')).filter((h) => h.by_ai && h.undoable).slice(0, 1)[0] || null;
 
   const bits = [];

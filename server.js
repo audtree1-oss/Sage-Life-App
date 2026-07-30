@@ -1577,8 +1577,76 @@ app.get('/api/views/now', async (req, res) => {
     events: p.events, nextEvent,
     immediate, reminders, routines: timely,
     weightToday,
+    morning: morningOpening(uid, ctx, { hour, nextEvent, overdue: p.overdue }),
     counts: { open: p.all.length, overdue: p.overdue.length, blocked: p.blocked.length },
   });
+});
+
+// ---------------------------------------------------------------------------
+// THE MORNING HOUR
+//
+// For forty years her mornings belonged to a clock. She got up in the dark,
+// drove in, drove home in the dark. The quiet hour with coffee and the
+// hummingbirds is not empty space before the day starts — it is the part of
+// the day she earned, and the most valuable hour in it.
+//
+// An assistant that opens with "here are your tasks" turns that back into a
+// commute, just a digital one. So it doesn't. The day is still here, one tap
+// away, the moment she wants it — and anything that would genuinely make her
+// late is still said out loud, gently, because withholding that would be its
+// own kind of failure.
+// ---------------------------------------------------------------------------
+const MORNING_ENDS_AT = 10;
+
+function morningOpening(uid, ctx, { hour, nextEvent, overdue }) {
+  const pref = db.prepare("SELECT value FROM preferences WHERE user_id = ? AND key = 'gentle_mornings'").get(uid);
+  if (pref && pref.value === 'off') return null;
+  if (hour >= MORNING_ENDS_AT) return null;
+
+  // Only things in the next three hours are worth breaking the quiet for.
+  // Both clocks must be Sage's, not the server's — the machine this runs on
+  // is elsewhere, and comparing her 9:30 against a UTC "now" reads it as
+  // hours in the past.
+  let soon = null;
+  if (nextEvent && nextEvent.event_start && nextEvent.event_start.length > 10) {
+    const [nowH, nowM] = timeNow().split(':').map(Number);
+    const [evH, evM] = nextEvent.event_start.slice(11, 16).split(':').map(Number);
+    const mins = (evH * 60 + evM) - (nowH * 60 + nowM);
+    if (mins > 0 && mins <= 180) {
+      const hrs = Math.floor(mins / 60);
+      const rem = mins % 60;
+      const away = hrs
+        ? `${hrs} hour${hrs > 1 ? 's' : ''}${rem >= 10 ? ` and ${rem} minutes` : ''}`
+        : `${mins} minutes`;
+      soon = { title: nextEvent.title, at: nextEvent.event_start, away, prep_minutes: nextEvent.prep_minutes || 0 };
+    }
+  }
+
+  // Only ever say true things. Sage cannot see the feeder, so it does not
+  // claim to — but it can say what the morning is actually doing outside.
+  const notes = [];
+  const w = ctx.weather;
+  if (w) {
+    if (w.rainingNow) notes.push('It’s raining out there.');
+    else if (w.todayRain) notes.push(`Rain is coming later — ${w.tempNow}° right now.`);
+    else if (w.tempNow >= 80) notes.push(`Already ${w.tempNow}°. It’ll be ${w.todayHigh}° by afternoon.`);
+    else notes.push(`${w.tempNow}° out, heading for ${w.todayHigh}°.`);
+  }
+  if (ctx.activeTrip) notes.push('You’re at the lake.');
+
+  return {
+    quiet: !soon && !overdue.length,
+    soon,
+    notes,
+    line: 'This time belongs to you. There’s nothing you need to do right now.',
+  };
+}
+
+app.post('/api/preferences/gentle-mornings', (req, res) => {
+  db.prepare(`INSERT INTO preferences (user_id, key, value) VALUES (?, 'gentle_mornings', ?)
+    ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value`)
+    .run(req.user.id, (req.body || {}).on === false ? 'off' : 'on');
+  res.json({ ok: true });
 });
 
 app.get('/api/views/today', async (req, res) => {
