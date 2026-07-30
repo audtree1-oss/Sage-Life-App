@@ -1214,6 +1214,8 @@ function openItem(i) {
       <div style="flex:1"><label class="field">Due</label><input type="date" id="it-due" value="${esc((i.due_at || '').slice(0, 10))}"></div>
       <div style="flex:1"><label class="field">Not before</label><input type="date" id="it-win" value="${esc(i.window_start || '')}"></div>
     </div>
+    ${i.type !== 'project' ? `<label class="field">Project</label>
+      <select id="it-project"><option value="0">No project</option></select>` : ''}
     ${i.type === 'project' ? `<label class="field">Next action</label><input type="text" id="it-next" value="${esc(i.next_action || '')}">
       <label class="field">What done looks like</label><input type="text" id="it-outcome" value="${esc(i.outcome || '')}">` : ''}
     <div class="btn-row" style="margin-top:18px">
@@ -1223,6 +1225,14 @@ function openItem(i) {
     </div>
     <button class="btn danger small" id="it-del" style="margin-top:10px">Delete</button>`);
 
+  if ($('#it-project', m)) {
+    api('/api/items?type=project&status=open').then((projects) => {
+      const select = $('#it-project', m);
+      if (!select) return;
+      select.innerHTML = `<option value="0">No project</option>${projects.map((p) =>
+        `<option value="${p.id}" ${p.id === i.project_id ? 'selected' : ''}>${esc(p.title)}</option>`).join('')}`;
+    }).catch(() => {});
+  }
   if ($('#it-fixgo', m)) $('#it-fixgo', m).onclick = async () => {
     const text = $('#it-fix', m).value.trim();
     if (!text) return;
@@ -1238,6 +1248,7 @@ function openItem(i) {
       due_at: $('#it-due', m).value, window_start: $('#it-win', m).value,
       ai_private: $('#it-private', m).checked,
     };
+    if ($('#it-project', m)) body.project_id = parseInt($('#it-project', m).value, 10) || 0;
     if ($('#it-next', m)) { body.next_action = $('#it-next', m).value; body.outcome = $('#it-outcome', m).value; }
     await api(`/api/items/${i.id}`, { method: 'PATCH', body });
     closeModal(); toast('Saved.'); setView(VIEW);
