@@ -764,6 +764,7 @@ app.post('/api/setup', (req, res) => {
     .run(token, info.lastInsertRowid);
   setSessionCookie(res, token);
   seedForUser(info.lastInsertRowid);
+  applyTopUps(info.lastInsertRowid);
   res.json({ ok: true });
 });
 
@@ -3070,10 +3071,62 @@ function seedForUser(uid) {
 }
 
 // ---------------------------------------------------------------------------
+// One-time additions for an account that already exists. seedForUser only runs
+// at setup, so anything that arrives later — a list moved over from her phone —
+// needs its own way in. Each top-up is applied once and recorded by name, so a
+// restart never leaves her with ten copies of her subscriptions.
+// ---------------------------------------------------------------------------
+const TOP_UPS = {
+  // Her Apple Reminders "Subscriptions" list. iCloud refuses to share that list
+  // with other apps, so it was typed in from what she sent rather than synced.
+  subscriptions_v1(uid) {
+    const S = require('./seed-data');
+    const already = db.prepare("SELECT id FROM items WHERE user_id = ? AND type = 'project' AND title = ?")
+      .get(uid, S.SUBSCRIPTIONS.project.title);
+    if (already) return 'already there';
+
+    const insert = db.prepare(`INSERT INTO items
+      (user_id, raw_capture, title, note, type, status, importance, life_area, due_at, outcome, project_id, source)
+      VALUES (?, ?, ?, ?, ?, 'open', ?, 'subscriptions', ?, ?, ?, 'reminders')`);
+    const p = S.SUBSCRIPTIONS.project;
+    const projectId = insert.run(uid, '', p.title, p.note || '', 'project', 'should', '', p.outcome || '', 0).lastInsertRowid;
+    for (const i of S.SUBSCRIPTIONS.items) {
+      insert.run(uid, i.raw || '', i.title, i.note || '', 'task', i.importance || 'should', i.due_at || '', '', projectId);
+    }
+    logHistory(uid, 'seed', projectId, 'added', `Subscriptions list moved over — ${S.SUBSCRIPTIONS.items.length} renewals`);
+    return `${S.SUBSCRIPTIONS.items.length} renewals`;
+  },
+};
+
+function applyTopUps(onlyUid) {
+  const users = onlyUid ? [{ id: onlyUid }] : db.prepare('SELECT id FROM users').all();
+  const mark = db.prepare(`INSERT INTO preferences (user_id, key, value) VALUES (?, ?, ?)
+    ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value`);
+  const done = db.prepare('SELECT value FROM preferences WHERE user_id = ? AND key = ?');
+  for (const u of users) {
+    for (const [name, run] of Object.entries(TOP_UPS)) {
+      const key = `topup_${name}`;
+      if (done.get(u.id, key)) continue;
+      try {
+        const what = run(u.id);
+        mark.run(u.id, key, new Date().toISOString());
+        console.log(`Top-up ${name}: ${what}`);
+      } catch (e) {
+        // Left unmarked on purpose — a top-up that failed should be retried on
+        // the next boot rather than silently skipped forever.
+        console.error(`Top-up ${name} failed:`, e.message);
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 app.use((err, req, res, next) => {
   console.error(err);
   res.status(500).json({ error: 'Something broke on our end. Your data is safe; try again.' });
 });
+
+applyTopUps();
 
 app.listen(PORT, () => {
   console.log(`Sage listening on :${PORT} — data in ${DATA_DIR}, AI ${AI_API_KEY ? `on (${AI_PROVIDER})` : 'off (structure still works)'}`);

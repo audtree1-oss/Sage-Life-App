@@ -258,6 +258,7 @@ function sourceLabel(i) {
   if (i.source_label) return i.source_label;
   return ({
     seed: 'Sage’s starter context',
+    reminders: 'your Reminders list',
     voice: 'voice capture',
     typed: 'Sage capture',
     ai: 'Sage',
