@@ -268,6 +268,29 @@ CREATE TABLE IF NOT EXISTS cal_events (
   event_kind TEXT NOT NULL DEFAULT '',
   UNIQUE(user_id, uid)
 );
+CREATE TABLE IF NOT EXISTS reminder_lists (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  url TEXT NOT NULL,
+  name TEXT NOT NULL,
+  color TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  last_error TEXT NOT NULL DEFAULT '',
+  UNIQUE(user_id, url)
+);
+CREATE TABLE IF NOT EXISTS external_reminders (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  list_id INTEGER NOT NULL REFERENCES reminder_lists(id) ON DELETE CASCADE,
+  uid TEXT NOT NULL,
+  title TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  due TEXT NOT NULL DEFAULT '',
+  start TEXT NOT NULL DEFAULT '',
+  completed INTEGER NOT NULL DEFAULT 0,
+  priority INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(user_id, list_id, uid)
+);
 CREATE INDEX IF NOT EXISTS idx_cal_events_start ON cal_events(user_id, start);
 `);
 
@@ -532,15 +555,32 @@ async function buildContext(uid, date = today()) {
   // Her iCloud appointments count the same as ones entered here: a PT
   // appointment on her real calendar suppresses home PT (spec §9).
   const externalEvents = db.prepare(`
-    SELECT * FROM cal_events WHERE user_id = ? AND substr(start, 1, 10) = ? ORDER BY start`).all(uid, date)
+    SELECT e.*, c.name AS calendar_name, c.kind AS calendar_kind
+    FROM cal_events e JOIN cal_calendars c ON c.id = e.calendar_id
+    WHERE e.user_id = ? AND substr(e.start, 1, 10) = ? ORDER BY e.start`).all(uid, date)
     .map((e) => ({
       id: `cal-${e.id}`, title: e.title, type: 'event', status: 'open', importance: 'must',
       event_start: e.all_day ? '' : e.start, due_at: e.start.slice(0, 10),
       event_kind: e.event_kind, location: e.location, external: 1, all_day: e.all_day,
+      source_kind: 'calendar',
+      source_label: e.calendar_kind === 'caldav'
+        ? `iCloud · ${e.calendar_name || 'Calendar'}`
+        : (e.calendar_name || 'Subscribed calendar'),
       note: '', prep_minutes: 0, blockers: [],
     }));
   const events = [...ownEvents, ...externalEvents]
     .sort((a, b) => (a.event_start || '~').localeCompare(b.event_start || '~'));
+  const reminders = db.prepare(`
+    SELECT r.*, l.name AS list_name
+    FROM external_reminders r JOIN reminder_lists l ON l.id = r.list_id
+    WHERE r.user_id = ? AND r.completed = 0 AND l.enabled = 1
+    ORDER BY CASE WHEN r.due = '' THEN 1 ELSE 0 END, r.due, r.title LIMIT 250`).all(uid)
+    .map((r) => ({
+      id: `rem-${r.id}`, title: r.title, note: r.note, type: 'task', status: 'open',
+      importance: r.priority === 1 ? 'must' : 'should', due_at: r.due,
+      external: 1, external_kind: 'reminder', source_kind: 'reminder',
+      source_label: `Apple Reminders · ${r.list_name || 'Reminders'}`, blockers: [],
+    }));
   const eventKinds = new Set(events.map((e) => e.event_kind).filter(Boolean));
 
   // Hosting: day-of is best for freshness, the day before is acceptable —
@@ -557,7 +597,7 @@ async function buildContext(uid, date = today()) {
     hour: hourNow(),
     locations: locs, here, hereKey,
     activeTrip, upcomingTrip,
-    weather, events, eventKinds, hostingSoon,
+    weather, events, reminders, eventKinds, hostingSoon,
     tripDeparture: upcomingTrip && upcomingTrip.start_date <= daysFrom(date, 1) ? upcomingTrip : null,
     tripEnding: activeTrip && activeTrip.end_date && activeTrip.end_date <= daysFrom(date, 1) ? activeTrip : null,
   };
@@ -989,6 +1029,7 @@ app.get('/api/views/now', async (req, res) => {
   p.events = ctx.events;
   const nextEvent = p.events.find((e) => !e.event_start || e.event_start.slice(11) >= timeNow()) || p.events[0] || null;
   const immediate = [...p.overdue, ...p.dueToday].sort((a, b) => scoreItem(b) - scoreItem(a)).slice(0, 6);
+  const reminders = ctx.reminders.filter((r) => r.due_at && r.due_at.slice(0, 10) <= date).slice(0, 8);
   const weightToday = db.prepare("SELECT * FROM tracking WHERE user_id = ? AND kind = 'weight' AND date = ?").get(uid, date) || null;
 
   res.json({
@@ -996,7 +1037,7 @@ app.get('/api/views/now', async (req, res) => {
     here: ctx.here, weather: ctx.weather,
     activeTrip: ctx.activeTrip, upcomingTrip: ctx.upcomingTrip,
     events: p.events, nextEvent,
-    immediate, routines: timely,
+    immediate, reminders, routines: timely,
     weightToday,
     counts: { open: p.all.length, overdue: p.overdue.length, blocked: p.blocked.length },
   });
@@ -1011,6 +1052,7 @@ app.get('/api/views/today', async (req, res) => {
   res.json({
     date, here: ctx.here, weather: ctx.weather,
     events: ctx.events,
+    reminders: ctx.reminders.filter((r) => r.due_at && r.due_at.slice(0, 10) <= date),
     must: [...p.overdue, ...p.dueToday].filter((i) => i.importance === 'must').sort((a, b) => scoreItem(b) - scoreItem(a)),
     should: [...p.overdue, ...p.dueToday].filter((i) => i.importance !== 'must').sort((a, b) => scoreItem(b) - scoreItem(a)),
     anytime: p.noDate.filter((i) => i.importance !== 'someday').sort((a, b) => scoreItem(b) - scoreItem(a)).slice(0, 12),
@@ -1025,11 +1067,18 @@ app.get('/api/views/week', async (req, res) => {
   const ctx = await buildContext(uid);
   const p = partitionItems(uid, ctx);
   const end = daysFromNow(7);
-  const external = db.prepare(`SELECT * FROM cal_events WHERE user_id = ? AND substr(start, 1, 10) BETWEEN ? AND ?`)
+  const external = db.prepare(`
+    SELECT e.*, c.name AS calendar_name, c.kind AS calendar_kind
+    FROM cal_events e JOIN cal_calendars c ON c.id = e.calendar_id
+    WHERE e.user_id = ? AND substr(e.start, 1, 10) BETWEEN ? AND ?`)
     .all(uid, today(), end)
     .map((e) => ({ id: `cal-${e.id}`, title: e.title, type: 'event', status: 'open', importance: 'must',
       event_start: e.all_day ? '' : e.start, due_at: e.start.slice(0, 10), event_kind: e.event_kind,
-      location: e.location, external: 1, blockers: [] }));
+      location: e.location, external: 1, source_kind: 'calendar',
+      source_label: e.calendar_kind === 'caldav'
+        ? `iCloud · ${e.calendar_name || 'Calendar'}`
+        : (e.calendar_name || 'Subscribed calendar'),
+      blockers: [] }));
   const days = [];
   for (let d = 0; d < 7; d++) {
     const date = daysFromNow(d);
@@ -1040,6 +1089,7 @@ app.get('/api/views/week', async (req, res) => {
         .sort((a, b) => (a.event_start || '~').localeCompare(b.event_start || '~')),
       items: p.all.filter((i) => i.type !== 'event' && i.due_at && i.due_at.slice(0, 10) === date && !i.blockers.length),
     });
+    days[days.length - 1].items.push(...ctx.reminders.filter((r) => r.due_at.slice(0, 10) === date));
   }
   res.json({
     days,
@@ -1286,6 +1336,10 @@ function selectContext(uid, ctx, { text = '', budget = 24, routines = [] } = {})
     here: ctx.hereKey,
     weather: weatherMatters ? { high: ctx.weather.todayHigh, low: ctx.weather.todayLow, rain: ctx.weather.todayRain } : undefined,
     appointmentsToday: (ctx.events || []).map((e) => ({ title: e.title, at: e.event_start || 'all day', kind: e.event_kind || undefined })),
+    appleReminders: (ctx.reminders || [])
+      .filter((r) => !r.due_at || r.due_at.slice(0, 10) <= daysFrom(t, 7))
+      .slice(0, 20)
+      .map((r) => ({ title: r.title, due: r.due_at || undefined, list: r.source_label })),
     routinesPending: pending.length ? pending : undefined,
     activeTrip: ctx.activeTrip || undefined,
     upcomingTrip: ctx.upcomingTrip || undefined,
@@ -1501,6 +1555,7 @@ async function syncCalendars(uid, { force = false } = {}) {
   const from = daysFromNow(-CAL_WINDOW_BACK);
   const to = daysFromNow(CAL_WINDOW_FORWARD);
   const seen = new Set();
+  const seenReminders = new Set();
   const errors = [];
   const insEvent = db.prepare(`INSERT INTO cal_events (user_id, calendar_id, uid, title, start, end, all_day, location, event_kind)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1515,6 +1570,19 @@ async function syncCalendars(uid, { force = false } = {}) {
       insEvent.run(uid, calId, uniq, e.title, e.start, e.end, e.all_day, e.location, caldav.inferEventKind(e.title));
     }
   };
+  const insReminder = db.prepare(`INSERT INTO external_reminders
+    (user_id, list_id, uid, title, note, due, start, completed, priority)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(user_id, list_id, uid) DO UPDATE SET title = excluded.title,
+      note = excluded.note, due = excluded.due, start = excluded.start,
+      completed = excluded.completed, priority = excluded.priority`);
+  const storeReminders = (listId, reminders) => {
+    for (const r of reminders.slice(0, 3000)) {
+      const uniq = `${listId}::${r.uid}`;
+      seenReminders.add(uniq);
+      insReminder.run(uid, listId, r.uid, r.title, r.note, r.due, r.start, r.completed, r.priority);
+    }
+  };
 
   // --- iCloud ---
   if (acctRow) {
@@ -1526,13 +1594,22 @@ async function syncCalendars(uid, { force = false } = {}) {
     } else if (creds) {
       const { acct, password } = creds;
       try {
-        const cals = await caldav.listCalendars(acct.home_url, acct.apple_id, password);
+        const collections = await caldav.listCalendars(acct.home_url, acct.apple_id, password);
+        const cals = collections.filter((c) => c.supportsEvents);
+        const lists = collections.filter((c) => c.supportsTodos);
         const upsert = db.prepare(`INSERT INTO cal_calendars (user_id, url, name, color, kind) VALUES (?, ?, ?, ?, 'caldav')
           ON CONFLICT(user_id, url) DO UPDATE SET name = excluded.name, color = excluded.color`);
         for (const c of cals) upsert.run(uid, c.url, c.name, c.color);
+        const upsertList = db.prepare(`INSERT INTO reminder_lists (user_id, url, name, color) VALUES (?, ?, ?, ?)
+          ON CONFLICT(user_id, url) DO UPDATE SET name = excluded.name, color = excluded.color`);
+        for (const list of lists) upsertList.run(uid, list.url, list.name, list.color);
         const enabled = db.prepare("SELECT * FROM cal_calendars WHERE user_id = ? AND enabled = 1 AND kind = 'caldav'").all(uid);
         for (const cal of enabled) {
           store(cal.id, await caldav.fetchEvents(cal.url, acct.apple_id, password, from, to));
+        }
+        const enabledLists = db.prepare('SELECT * FROM reminder_lists WHERE user_id = ? AND enabled = 1').all(uid);
+        for (const list of enabledLists) {
+          storeReminders(list.id, await caldav.fetchTodos(list.url, acct.apple_id, password));
         }
         db.prepare("UPDATE cal_account SET last_sync = datetime('now'), last_error = '' WHERE user_id = ?").run(uid);
       } catch (e) {
@@ -1563,11 +1640,15 @@ async function syncCalendars(uid, { force = false } = {}) {
       .map((r) => r.uid).filter((u) => !seen.has(u));
     const del = db.prepare('DELETE FROM cal_events WHERE user_id = ? AND uid = ?');
     for (const u of stale) del.run(uid, u);
+    const staleReminders = db.prepare('SELECT list_id, uid FROM external_reminders WHERE user_id = ?').all(uid)
+      .filter((r) => !seenReminders.has(`${r.list_id}::${r.uid}`));
+    const delReminder = db.prepare('DELETE FROM external_reminders WHERE user_id = ? AND list_id = ? AND uid = ?');
+    for (const r of staleReminders) delReminder.run(uid, r.list_id, r.uid);
   }
 
   db.prepare(`INSERT INTO preferences (user_id, key, value) VALUES (?, 'cal_last_sync', ?)
     ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value`).run(uid, new Date().toISOString());
-  return { connected: true, events: seen.size, errors };
+  return { connected: true, events: seen.size, reminders: seenReminders.size, errors };
 }
 
 app.post('/api/calendar/connect', async (req, res) => {
@@ -1593,14 +1674,17 @@ app.post('/api/calendar/connect', async (req, res) => {
 app.get('/api/calendar/status', (req, res) => {
   const acct = db.prepare('SELECT apple_id, last_sync, last_error FROM cal_account WHERE user_id = ?').get(req.user.id);
   const cals = db.prepare('SELECT id, name, color, enabled, kind, last_error, url FROM cal_calendars WHERE user_id = ? ORDER BY kind, name').all(req.user.id);
+  const lists = db.prepare('SELECT id, name, color, enabled, last_error FROM reminder_lists WHERE user_id = ? ORDER BY name').all(req.user.id);
   const lastSync = db.prepare("SELECT value FROM preferences WHERE user_id = ? AND key = 'cal_last_sync'").get(req.user.id);
   res.json({
     icloud: acct ? { connected: true, apple_id: acct.apple_id, last_error: acct.last_error } : { connected: false },
     calendars: cals.filter((c) => c.kind === 'caldav'),
     feeds: cals.filter((c) => c.kind === 'ics').map((f) => ({ ...f, url: undefined })),
+    reminder_lists: lists,
     last_sync: lastSync ? lastSync.value : '',
     connected: !!acct || cals.some((c) => c.kind === 'ics'),
     event_count: db.prepare('SELECT COUNT(*) AS n FROM cal_events WHERE user_id = ?').get(req.user.id).n,
+    reminder_count: db.prepare('SELECT COUNT(*) AS n FROM external_reminders WHERE user_id = ? AND completed = 0').get(req.user.id).n,
   });
 });
 
@@ -1645,7 +1729,18 @@ app.patch('/api/calendar/calendars/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+app.patch('/api/reminders/lists/:id', (req, res) => {
+  db.prepare('UPDATE reminder_lists SET enabled = ? WHERE id = ? AND user_id = ?')
+    .run((req.body || {}).enabled ? 1 : 0, req.params.id, req.user.id);
+  if (!(req.body || {}).enabled) {
+    db.prepare('DELETE FROM external_reminders WHERE user_id = ? AND list_id = ?').run(req.user.id, req.params.id);
+  }
+  res.json({ ok: true });
+});
+
 app.delete('/api/calendar/connect', (req, res) => {
+  db.prepare('DELETE FROM external_reminders WHERE user_id = ?').run(req.user.id);
+  db.prepare('DELETE FROM reminder_lists WHERE user_id = ?').run(req.user.id);
   db.prepare('DELETE FROM cal_events WHERE user_id = ?').run(req.user.id);
   db.prepare('DELETE FROM cal_calendars WHERE user_id = ?').run(req.user.id);
   db.prepare('DELETE FROM cal_account WHERE user_id = ?').run(req.user.id);
