@@ -133,6 +133,7 @@ CREATE TABLE IF NOT EXISTS items (
   eligibility TEXT NOT NULL DEFAULT '{}',      -- opportunities: JSON rules
   waiting_on TEXT NOT NULL DEFAULT '',
   source TEXT NOT NULL DEFAULT 'manual',       -- voice|typed|ai|seed
+  ai_private INTEGER NOT NULL DEFAULT 0,        -- never include in provider prompts
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   done_at TEXT NOT NULL DEFAULT ''
@@ -213,6 +214,7 @@ CREATE TABLE IF NOT EXISTS sage_files (
   title TEXT NOT NULL,
   note TEXT NOT NULL DEFAULT '',
   source TEXT NOT NULL DEFAULT 'uploaded',
+  encrypted INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 -- Health/tracking lives apart from task data on purpose (spec §5, §12).
@@ -307,6 +309,43 @@ CREATE TABLE IF NOT EXISTS external_reminders (
 CREATE INDEX IF NOT EXISTS idx_cal_events_start ON cal_events(user_id, start);
 `);
 
+function ensureColumn(table, column, definition) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+  if (!cols.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
+ensureColumn('items', 'ai_private', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('sage_files', 'encrypted', 'INTEGER NOT NULL DEFAULT 0');
+db.prepare("UPDATE sessions SET expires_at = datetime('now', '+30 days') WHERE expires_at > datetime('now', '+30 days')").run();
+
+const fileKey = crypto.scryptSync(String(SESSION_SECRET), 'sage-files-v1', 32);
+function encryptFileBytes(plain) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', fileKey, iv);
+  const body = Buffer.concat([cipher.update(plain), cipher.final()]);
+  return Buffer.concat([Buffer.from('SGF1'), iv, cipher.getAuthTag(), body]);
+}
+function decryptFileBytes(blob) {
+  if (blob.subarray(0, 4).toString() !== 'SGF1') throw new Error('Unknown encrypted file format');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', fileKey, blob.subarray(4, 16));
+  decipher.setAuthTag(blob.subarray(16, 32));
+  return Buffer.concat([decipher.update(blob.subarray(32)), decipher.final()]);
+}
+function encryptStoredFile(storedName) {
+  const p = path.join(UPLOAD_DIR, storedName);
+  const tmp = `${p}.encrypting`;
+  fs.writeFileSync(tmp, encryptFileBytes(fs.readFileSync(p)), { mode: 0o600 });
+  fs.renameSync(tmp, p);
+}
+// One-time migration for files uploaded before cabinet encryption existed.
+for (const f of db.prepare('SELECT id, stored_name FROM sage_files WHERE encrypted = 0').all()) {
+  try {
+    encryptStoredFile(f.stored_name);
+    db.prepare('UPDATE sage_files SET encrypted = 1 WHERE id = ?').run(f.id);
+  } catch (e) {
+    console.error(`Could not encrypt stored file ${f.id}: ${e.message}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
@@ -355,6 +394,17 @@ function logHistory(uid, entity, id, action, detail, byAI = 0, undoable = '') {
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
+app.use((req, res, next) => {
+  res.set({
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Referrer-Policy': 'no-referrer',
+    'Permissions-Policy': 'camera=(), geolocation=(), payment=(), usb=()',
+    'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+  });
+  if (IS_PROD) res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  next();
+});
 app.use(express.json({ limit: '2mb' }));
 // Safari requires a real PNG for an iPhone home-screen icon. Keeping this
 // tiny asset inline also prevents it being missed by source-only deployments.
@@ -368,7 +418,7 @@ app.get('/apple-touch-icon.png', (req, res) => {
 app.use(express.static(path.join(__dirname, 'public')));
 
 const COOKIE = 'sage_session';
-const SESSION_DAYS = 120;
+const SESSION_DAYS = 30;
 
 function parseCookies(req) {
   const out = {};
@@ -396,6 +446,23 @@ function requireAuth(req, res, next) {
   req.user = user;
   next();
 }
+
+const loginAttempts = new Map();
+function loginAttemptKey(req) {
+  return `${req.ip}|${String((req.body || {}).email || '').trim().toLowerCase()}`;
+}
+function loginBlocked(req) {
+  const hit = loginAttempts.get(loginAttemptKey(req));
+  if (!hit || hit.until <= Date.now()) return false;
+  return hit.count >= 5;
+}
+function loginFailed(req) {
+  const key = loginAttemptKey(req);
+  const old = loginAttempts.get(key);
+  const fresh = !old || old.until <= Date.now();
+  loginAttempts.set(key, { count: fresh ? 1 : old.count + 1, until: Date.now() + 15 * 60 * 1000 });
+}
+function loginSucceeded(req) { loginAttempts.delete(loginAttemptKey(req)); }
 
 app.get('/healthz', (req, res) => res.json({ ok: true }));
 
@@ -436,11 +503,16 @@ app.post('/api/setup', (req, res) => {
 });
 
 app.post('/api/login', (req, res) => {
+  if (loginBlocked(req)) {
+    return res.status(429).json({ error: 'Too many sign-in tries. Wait 15 minutes, then try again.' });
+  }
   const { email, password } = req.body || {};
   const user = db.prepare('SELECT * FROM users WHERE email = ?').get((email || '').trim().toLowerCase());
   if (!user || !bcrypt.compareSync(password || '', user.password_hash)) {
+    loginFailed(req);
     return res.status(401).json({ error: 'That combination did not work. Try again.' });
   }
+  loginSucceeded(req);
   const token = crypto.randomBytes(32).toString('hex');
   db.prepare(`INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, datetime('now', '+${SESSION_DAYS} days'))`)
     .run(token, user.id);
@@ -451,6 +523,14 @@ app.post('/api/login', (req, res) => {
 app.post('/api/logout', (req, res) => {
   const token = parseCookies(req)[COOKIE];
   if (token) db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+  res.setHeader('Set-Cookie', `${COOKIE}=; Path=/; HttpOnly; Max-Age=0`);
+  res.json({ ok: true });
+});
+
+app.post('/api/logout-all', (req, res) => {
+  const user = currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Not logged in.' });
+  db.prepare('DELETE FROM sessions WHERE user_id = ?').run(user.id);
   res.setHeader('Set-Cookie', `${COOKIE}=; Path=/; HttpOnly; Max-Age=0`);
   res.json({ ok: true });
 });
@@ -736,7 +816,7 @@ const IMPORTANCES = ['must', 'should', 'opportunity', 'someday'];
 const ITEM_FIELDS = ['raw_capture', 'title', 'note', 'type', 'status', 'importance', 'life_area', 'location',
   'due_at', 'window_start', 'window_end', 'target_window', 'effort_min', 'project_id', 'prereq_ids',
   'next_action', 'outcome', 'event_start', 'event_end', 'prep_minutes', 'event_kind', 'attendees',
-  'store', 'purchase_rule', 'inventory_state', 'photo_file', 'eligibility', 'waiting_on', 'source'];
+  'store', 'purchase_rule', 'inventory_state', 'photo_file', 'eligibility', 'waiting_on', 'source', 'ai_private'];
 
 function cleanItem(b, existing) {
   const out = {};
@@ -744,6 +824,7 @@ function cleanItem(b, existing) {
     if (b[f] === undefined || b[f] === null) continue;
     if (f === 'prereq_ids' || f === 'eligibility') out[f] = typeof b[f] === 'string' ? b[f] : JSON.stringify(b[f]);
     else if (f === 'effort_min' || f === 'project_id' || f === 'prep_minutes') out[f] = parseInt(b[f], 10) || 0;
+    else if (f === 'ai_private') out[f] = b[f] ? 1 : 0;
     else out[f] = String(b[f]).trim();
   }
   if (out.type && !ITEM_TYPES.includes(out.type)) out.type = 'task';
@@ -845,7 +926,11 @@ app.get('/photos/:file', (req, res) => {
 // existing photo uploads on Sage's persistent data disk.
 app.get('/api/files', (req, res) => {
   res.json(db.prepare(`
-    SELECT f.*, i.title AS related_item_title
+    SELECT f.*, i.title AS related_item_title,
+      (SELECT MAX(h.created_at) FROM history h WHERE h.user_id = f.user_id
+        AND h.entity = 'file' AND h.entity_id = f.id AND h.action = 'opened') AS last_opened,
+      (SELECT COUNT(*) FROM history h WHERE h.user_id = f.user_id
+        AND h.entity = 'file' AND h.entity_id = f.id AND h.action = 'opened') AS access_count
     FROM sage_files f LEFT JOIN items i
       ON i.id = f.related_item_id AND i.user_id = f.user_id
     WHERE f.user_id = ? ORDER BY f.created_at DESC, f.id DESC`).all(req.user.id));
@@ -862,9 +947,15 @@ app.post('/api/files', fileUpload.single('file'), (req, res) => {
   const title = String((req.body || {}).title || '').trim().slice(0, 160)
     || path.basename(original, path.extname(original));
   const note = String((req.body || {}).note || '').trim().slice(0, 2000);
+  try {
+    encryptStoredFile(req.file.filename);
+  } catch {
+    try { fs.unlinkSync(req.file.path); } catch {}
+    return res.status(500).json({ error: 'Sage could not encrypt that file, so it was not saved.' });
+  }
   const info = db.prepare(`INSERT INTO sage_files
-    (user_id, related_item_id, stored_name, original_name, mime_type, size_bytes, title, note)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+    (user_id, related_item_id, stored_name, original_name, mime_type, size_bytes, title, note, encrypted)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`)
     .run(req.user.id, related, req.file.filename, original, req.file.mimetype, req.file.size, title, note);
   logHistory(req.user.id, 'file', info.lastInsertRowid, 'uploaded', title);
   res.json(db.prepare('SELECT * FROM sage_files WHERE id = ?').get(info.lastInsertRowid));
@@ -875,13 +966,22 @@ app.get('/files/:id', (req, res) => {
   if (!f) return res.status(404).send('Not found');
   const p = path.join(UPLOAD_DIR, f.stored_name);
   if (!fs.existsSync(p)) return res.status(404).send('File is missing from storage');
-  res.set('X-Content-Type-Options', 'nosniff');
+  let bytes;
+  try {
+    const stored = fs.readFileSync(p);
+    bytes = f.encrypted ? decryptFileBytes(stored) : stored;
+  } catch {
+    return res.status(500).send('Sage could not decrypt this file');
+  }
+  logHistory(req.user.id, 'file', f.id, 'opened', f.title);
   if (f.mime_type === 'application/pdf' || f.mime_type.startsWith('image/')) {
     res.type(f.mime_type);
     res.set('Content-Disposition', `inline; filename="${f.original_name.replace(/["\r\n]/g, '')}"`);
-    return res.sendFile(p);
+    return res.send(bytes);
   }
-  res.download(p, f.original_name);
+  res.type(f.mime_type);
+  res.set('Content-Disposition', `attachment; filename="${f.original_name.replace(/["\r\n]/g, '')}"`);
+  res.send(bytes);
 });
 
 app.delete('/api/files/:id', (req, res) => {
@@ -1379,7 +1479,7 @@ function slim(i, why) {
 }
 
 function selectContext(uid, ctx, { text = '', budget = 24, routines = [] } = {}) {
-  const all = openItems(uid);
+  const all = openItems(uid).filter((i) => !i.ai_private);
   const byId = new Map(all.map((i) => [i.id, i]));
   const live = all.map((i) => ({ ...i, blockers: itemBlockers(i, byId) }));
   const t = ctx.date;
@@ -1429,7 +1529,8 @@ function selectContext(uid, ctx, { text = '', budget = 24, routines = [] } = {})
     dayOfWeek: new Date(`${t}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'UTC' }),
     here: ctx.hereKey,
     weather: weatherMatters ? { high: ctx.weather.todayHigh, low: ctx.weather.todayLow, rain: ctx.weather.todayRain } : undefined,
-    appointmentsToday: (ctx.events || []).map((e) => ({ title: e.title, at: e.event_start || 'all day', kind: e.event_kind || undefined })),
+    appointmentsToday: (ctx.events || []).filter((e) => !e.ai_private)
+      .map((e) => ({ title: e.title, at: e.event_start || 'all day', kind: e.event_kind || undefined })),
     appleReminders: (ctx.reminders || [])
       .filter((r) => !r.due_at || r.due_at.slice(0, 10) <= daysFrom(t, 7))
       .slice(0, 20)
@@ -1564,6 +1665,9 @@ app.post('/api/correct', async (req, res) => {
   const text = String((req.body || {}).text || '').slice(0, 500);
   const item = db.prepare('SELECT * FROM items WHERE id = ? AND user_id = ?').get(itemId, uid);
   if (!item || !text.trim()) return res.status(400).json({ error: 'Need an item and a correction.' });
+  if (item.ai_private) {
+    return res.status(400).json({ error: 'This is private from AI. Edit its fields directly instead.' });
+  }
   const ctx = await buildContext(uid);
   const ai = await askAI(
     SAGE_PERSONA + `\n\nRegena is correcting how one stored item is classified. Reply ONLY with JSON: {"changes":{...},"reply":"one short sentence"}. Allowed change fields: title, type, status, importance, due_at, window_start, target_window, location, life_area, effort_min, purchase_rule, note. Today is ${ctx.date}. "Not until September" means window_start on the 1st of the next September and target_window "September" — not a due date.`,
@@ -1846,11 +1950,19 @@ app.delete('/api/calendar/connect', (req, res) => {
 // Calendar feed out — real Apple/Google reminders, no integration needed
 // ---------------------------------------------------------------------------
 function calendarToken(u) {
-  return crypto.createHmac('sha256', SESSION_SECRET).update(`cal:${u.id}:${u.password_hash}`).digest('hex').slice(0, 32);
+  const nonce = db.prepare("SELECT value FROM preferences WHERE user_id = ? AND key = 'cal_share_nonce'").get(u.id)?.value;
+  const material = nonce ? `cal:${u.id}:${u.password_hash}:${nonce}` : `cal:${u.id}:${u.password_hash}`;
+  return crypto.createHmac('sha256', SESSION_SECRET).update(material).digest('hex').slice(0, 32);
 }
 app.get('/api/calendar-url', (req, res) => {
   const u = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
   res.json({ path: `/calendar/${calendarToken(u)}.ics` });
+});
+app.post('/api/calendar-url/reset', (req, res) => {
+  db.prepare("INSERT OR REPLACE INTO preferences (user_id, key, value) VALUES (?, 'cal_share_nonce', ?)")
+    .run(req.user.id, crypto.randomBytes(16).toString('hex'));
+  logHistory(req.user.id, 'calendar', 0, 'reset share link', '');
+  res.json({ ok: true });
 });
 const icsEsc = (t) => String(t || '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
 
