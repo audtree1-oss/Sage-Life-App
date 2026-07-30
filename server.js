@@ -2858,7 +2858,14 @@ const icsEsc = (t) => String(t || '').replace(/\\/g, '\\\\').replace(/;/g, '\\;'
 app.get('/calendar/:token.ics', (req, res) => {
   const user = db.prepare('SELECT * FROM users').all().find((u) => calendarToken(u) === req.params.token);
   if (!user) return res.status(404).send('Not found');
-  const items = db.prepare("SELECT * FROM items WHERE user_id = ? AND status = 'open' AND (due_at != '' OR event_start != '')").all(user.id);
+  // Her Apple Calendar is for appointments. Tasks with a due date are real
+  // dates too, but they belong on a list — putting them here turns her calendar
+  // into a to-do list she didn't ask for. Off unless she says otherwise.
+  const includeTasks = db.prepare("SELECT value FROM preferences WHERE user_id = ? AND key = 'cal_feed_tasks'")
+    .get(user.id)?.value === '1';
+  const items = db.prepare("SELECT * FROM items WHERE user_id = ? AND status = 'open' AND (due_at != '' OR event_start != '')")
+    .all(user.id)
+    .filter((i) => includeTasks || i.type === 'event');
   const trips = db.prepare(`SELECT * FROM trips WHERE user_id = ? AND status != 'done'`).all(user.id);
   const stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
   const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Sage//EN', 'CALSCALE:GREGORIAN',
