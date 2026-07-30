@@ -117,6 +117,18 @@ function queryBody(fromISO, toISO) {
 </C:calendar-query>`;
 }
 
+function todoQueryBody() {
+  return `<?xml version="1.0" encoding="utf-8"?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop><C:calendar-data/></D:prop>
+  <C:filter>
+    <C:comp-filter name="VCALENDAR">
+      <C:comp-filter name="VTODO"/>
+    </C:comp-filter>
+  </C:filter>
+</C:calendar-query>`;
+}
+
 // --- discovery -------------------------------------------------------------
 async function discover(appleId, password) {
   const auth = `${appleId}:${password}`;
@@ -150,11 +162,15 @@ async function listCalendars(homeUrl, appleId, password) {
     const rtype = firstValue(block, 'resourcetype');
     if (!/<calendar\s*\/?>/i.test(rtype)) continue;              // skip inbox/outbox/home itself
     const comps = firstValue(block, 'supported-calendar-component-set');
-    if (comps && !/name="VEVENT"/i.test(comps)) continue;        // skip reminder lists
+    const supportsEvents = !comps || /name=["']?VEVENT["']?/i.test(comps);
+    const supportsTodos = /name=["']?VTODO["']?/i.test(comps);
+    if (!supportsEvents && !supportsTodos) continue;
     out.push({
       url: resolve(homeUrl, href),
       name: decodeEntities(firstValue(block, 'displayname')) || 'Calendar',
       color: (decodeEntities(firstValue(block, 'calendar-color')) || '').slice(0, 9),
+      supportsEvents,
+      supportsTodos,
     });
   }
   return out;
@@ -218,6 +234,35 @@ function parseEvents(icsText) {
   return events;
 }
 
+function parseTodos(icsText) {
+  const todos = [];
+  for (const block of unfold(icsText).split(/BEGIN:VTODO/i).slice(1)) {
+    const body = block.split(/END:VTODO/i)[0];
+    const get = (name) => {
+      const m = new RegExp(`^${name}([^:\\r\\n]*):(.*)$`, 'im').exec(body);
+      return m ? { params: m[1], value: m[2].trim() } : null;
+    };
+    const uid = get('UID');
+    const summary = get('SUMMARY');
+    const due = get('DUE');
+    const start = get('DTSTART');
+    const status = get('STATUS');
+    const completed = get('COMPLETED');
+    const priority = parseInt((get('PRIORITY') || { value: '0' }).value, 10) || 0;
+    if (!uid && !summary) continue;
+    todos.push({
+      uid: (uid || { value: (summary || { value: 'reminder' }).value }).value,
+      title: icalUnescape((summary || { value: '(untitled reminder)' }).value).slice(0, 200),
+      note: icalUnescape((get('DESCRIPTION') || { value: '' }).value).slice(0, 2000),
+      due: due ? parseIcalDate(due.value, due.params).value : '',
+      start: start ? parseIcalDate(start.value, start.params).value : '',
+      completed: (completed || (status && /COMPLETED/i.test(status.value))) ? 1 : 0,
+      priority,
+    });
+  }
+  return todos;
+}
+
 async function fetchEvents(calendarUrl, appleId, password, fromISO, toISO) {
   const r = await dav(calendarUrl, {
     method: 'REPORT', body: queryBody(fromISO, toISO), depth: '1',
@@ -227,6 +272,19 @@ async function fetchEvents(calendarUrl, appleId, password, fromISO, toISO) {
   const out = [];
   for (const block of allBlocks(stripNs(r.text), 'calendar-data')) {
     out.push(...parseEvents(decodeEntities(block)));
+  }
+  return out;
+}
+
+async function fetchTodos(listUrl, appleId, password) {
+  const r = await dav(listUrl, {
+    method: 'REPORT', body: todoQueryBody(), depth: '1',
+    auth: `${appleId}:${password}`,
+  });
+  if (!r.ok) throw new Error(`Apple returned ${r.status} while reading a reminder list.`);
+  const out = [];
+  for (const block of allBlocks(stripNs(r.text), 'calendar-data')) {
+    out.push(...parseTodos(decodeEntities(block)));
   }
   return out;
 }
@@ -270,6 +328,6 @@ function inferEventKind(title) {
 }
 
 module.exports = {
-  encrypt, decrypt, discover, listCalendars, fetchEvents, fetchFeed, inferEventKind,
-  _internals: { parseEvents, parseIcalDate, stripNs, unfold, calendarName },
+  encrypt, decrypt, discover, listCalendars, fetchEvents, fetchTodos, fetchFeed, inferEventKind,
+  _internals: { parseEvents, parseTodos, parseIcalDate, stripNs, unfold, calendarName },
 };
