@@ -364,8 +364,12 @@ app.get('/api/me', (req, res) => {
 app.get('/api/ai/status', async (req, res) => {
   if (!AI_API_KEY) return res.json({ connected: false });
   const models = await resolveModels();
-  const probe = await askAI('Reply with the single word: ok', 'ping', { maxTokens: 10 });
-  res.json({ connected: true, provider: AI_PROVIDER, ...models, working: !!probe });
+  // Reasoning models may spend a tiny completion budget before emitting any
+  // visible text. Ten tokens produced false "call failed" reports even when
+  // the key, billing, and request were all valid.
+  const probe = await askAI('Reply with the single word: ok', 'ping', { maxTokens: 256 });
+  res.json({ connected: true, provider: AI_PROVIDER, ...models, working: !!probe,
+    error: probe ? '' : LAST_AI_ERROR });
 });
 
 app.post('/api/setup', (req, res) => {
@@ -430,8 +434,10 @@ How you behave:
 - Tone: warm, intelligent, natural, occasionally funny. Never patronizing. The relationship matters, not only the information — a generic task-manager voice is not Sage.
 - Her goal is lower cognitive load and fewer forgotten commitments, not maximum productivity, and not a smaller life.`;
 
+let LAST_AI_ERROR = '';
 async function askAI(system, user, { maxTokens = 1200, json = false, tier = 'fast' } = {}) {
   if (!AI_API_KEY) return null;
+  LAST_AI_ERROR = '';
   const models = await resolveModels();
   const model = models[tier] || models.fast;
   try {
@@ -451,17 +457,25 @@ async function askAI(system, user, { maxTokens = 1200, json = false, tier = 'fas
     }
     const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
     if (!r.ok) {
-      // A rejected model name is the one failure worth reporting loudly —
-      // everything still works, it just gets literal, and that looks like a bug.
-      if (r.status === 400 || r.status === 404) console.error(`Sage AI: "${model}" was rejected (${r.status}). Set AI_MODEL_FAST / AI_MODEL_SMART to override.`);
+      let detail = `HTTP ${r.status}`;
+      try {
+        const problem = await r.json();
+        detail = problem?.error?.message || detail;
+      } catch { /* keep the status-only explanation */ }
+      LAST_AI_ERROR = `${model}: ${detail}`;
+      console.error(`Sage AI call failed — ${LAST_AI_ERROR}`);
       return null;
     }
     const data = await r.json();
     const text = AI_PROVIDER === 'openai'
       ? (data.choices?.[0]?.message?.content || '')
       : (data.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('');
-    return text.trim().replace(/^```(json)?\s*/i, '').replace(/```\s*$/, '');
-  } catch {
+    const cleaned = text.trim().replace(/^```(json)?\s*/i, '').replace(/```\s*$/, '');
+    if (!cleaned) LAST_AI_ERROR = `${model}: the provider returned no visible text`;
+    return cleaned;
+  } catch (err) {
+    LAST_AI_ERROR = err?.message || 'network request failed';
+    console.error(`Sage AI call failed — ${LAST_AI_ERROR}`);
     return null;
   }
 }
