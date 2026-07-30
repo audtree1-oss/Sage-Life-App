@@ -974,12 +974,16 @@ VIEWS.settings = async function renderSettings() {
       </div>
     </div>
     <button class="btn ghost small" data-back style="margin-top:16px">← More</button>`;
-  $$('[data-text]').forEach((b) => b.onclick = () => {
+  // Scoped to #main on purpose. The <html> element carries data-text and
+  // data-theme (set at boot so the page never flashes the wrong theme), so an
+  // unscoped selector attaches these handlers to the whole document — and
+  // after one visit to Settings, every tap anywhere would bounce back here.
+  $$('#main [data-text]').forEach((b) => b.onclick = () => {
     document.documentElement.dataset.text = b.dataset.text;
     try { localStorage.setItem('sage_text', b.dataset.text); } catch {}
     setView('settings');
   });
-  $$('[data-theme]').forEach((b) => b.onclick = () => {
+  $$('#main [data-theme]').forEach((b) => b.onclick = () => {
     document.documentElement.dataset.theme = b.dataset.theme;
     try { localStorage.setItem('sage_theme', b.dataset.theme); } catch {}
     setView('settings');
