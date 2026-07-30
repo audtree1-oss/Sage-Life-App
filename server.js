@@ -1247,7 +1247,9 @@ function scoreItem(i) {
 // ---------------------------------------------------------------------------
 // Items API
 // ---------------------------------------------------------------------------
-const ITEM_TYPES = ['task', 'event', 'project', 'opportunity', 'shopping', 'note'];
+// 'list' is a plain container — a Costco list, a packing list. Unlike a project
+// it carries no outcome and no next action, and nothing on it is chasing her.
+const ITEM_TYPES = ['task', 'event', 'project', 'opportunity', 'shopping', 'note', 'list'];
 const ITEM_STATUSES = ['open', 'done', 'waiting', 'someday', 'dismissed'];
 const IMPORTANCES = ['must', 'should', 'opportunity', 'someday'];
 
@@ -1761,7 +1763,13 @@ function partitionItems(uid, ctx) {
   const t = ctx.date;
   const enrich = (i) => ({ ...i, blockers: itemBlockers(i, byId) });
   const live = all.map(enrich);
-  const actionable = live.filter((i) => !i.blockers.length && i.type !== 'event' && i.type !== 'project' && i.importance !== 'opportunity' && i.status !== 'waiting');
+  // A list, and anything sitting on one, stays out of the pressure surfaces
+  // unless she gave it a date herself. "Buy paper towels" belongs on the Costco
+  // list, not on the screen that tells her what today needs.
+  const listIds = new Set(live.filter((i) => i.type === 'list').map((i) => i.id));
+  const onAList = (i) => listIds.has(i.project_id) && !i.due_at;
+  const actionable = live.filter((i) => !i.blockers.length && i.type !== 'event' && i.type !== 'project'
+    && i.type !== 'list' && !onAList(i) && i.importance !== 'opportunity' && i.status !== 'waiting');
   return {
     all: live, byId,
     events: live.filter((i) => i.type === 'event' && (i.event_start || i.due_at).slice(0, 10) === t)
@@ -1773,6 +1781,7 @@ function partitionItems(uid, ctx) {
     blocked: live.filter((i) => i.blockers.length),
     waiting: live.filter((i) => i.status === 'waiting'),
     projects: live.filter((i) => i.type === 'project'),
+    lists: live.filter((i) => i.type === 'list'),
     shopping: live.filter((i) => i.type === 'shopping'),
     opportunities: live.filter((i) => i.importance === 'opportunity' || i.type === 'opportunity'),
   };
@@ -1972,6 +1981,27 @@ app.get('/api/views/opportunities', async (req, res) => {
     here: ctx.here, weather: ctx.weather,
     eligible,
     notYet: p.opportunities.filter((i) => i.blockers.length || !eligibleOpportunity(i, ctx)),
+  });
+});
+
+// Her own lists — a Costco list, a packing list. iCloud will not share the ones
+// on her phone, so these live here instead. A list is just a container: the
+// things on it never chase her unless she puts a date on one herself.
+app.get('/api/views/lists', async (req, res) => {
+  const uid = req.user.id;
+  const ctx = await buildContext(uid);
+  const p = partitionItems(uid, ctx);
+  const done = db.prepare("SELECT * FROM items WHERE user_id = ? AND status = 'done' AND project_id != 0 ORDER BY done_at DESC LIMIT 200").all(uid);
+  res.json({
+    lists: p.lists.map((l) => {
+      const open = p.all.filter((i) => i.project_id === l.id && i.type !== 'list');
+      return {
+        ...l,
+        items: open,
+        recentlyDone: done.filter((d) => d.project_id === l.id).slice(0, 8),
+        openCount: open.length,
+      };
+    }),
   });
 });
 
