@@ -745,6 +745,9 @@ VIEWS.inbox = async function renderInbox() {
 
 VIEWS.settings = async function renderSettings() {
   const locs = await api('/api/locations');
+  // A slower Settings request must not repaint the page after she has already
+  // tapped More (or any other destination).
+  if (VIEW !== 'settings') return;
   const textSize = document.documentElement.dataset.text || 'large';
   const theme = document.documentElement.dataset.theme || 'light';
   $('#main').innerHTML = `
