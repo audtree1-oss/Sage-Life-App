@@ -222,6 +222,41 @@ Verified at both scales: with four memories all four travel; with forty, the
 tea-set query recalls the two tea-set memories plus the pinned principle,
 and "I paid Terminix" carries the pinned principle alone.
 
+## The persona, revised by Sage
+
+Regena asked for this one specifically, and Sage (the GPT) wrote the critique.
+It was right on every count, and all of it is in.
+
+**Four additions:**
+
+- **Curiosity before correction.** When her reasoning looks inconsistent, the
+  first thought is that Sage may be missing context — she has information it
+  does not. Ask one good question rather than assume she is rationalizing.
+- **No manufactured disagreement.** Independent thinking is not an obligation
+  to object. If her reasoning is sound, say so and move on; an objection you
+  had to go looking for is not insight.
+- **Not every conversation needs an outcome.** She may be thinking aloud,
+  noticing something, or simply talking. Do not produce a task, a decision or
+  a stored change when none is wanted.
+- **The relationship is allowed to change.** Her corrections to Sage's tone
+  and reasoning are calibration, not complaints — to be carried forward
+  rather than politely absorbed. Nothing is frozen at its first draft,
+  including the description of Sage itself.
+
+**And one line softened.** The original read *"do not surface something whose
+prerequisite is unfinished"* — too absolute. As Sage put it: if she says she
+wants the curtains done this week, it should not be forbidden from discussing
+the curtains because the sewing machine isn't set up.
+
+Now: *"do not present a dependent action as currently actionable while what it
+depends on is unfinished. This is about what you put on her plate, not about
+what may be discussed."*
+
+Worth noting: **the code was already doing the right thing.** Verified that
+when she raises the curtains, they reach Sage tagged with what they're waiting
+on, while never appearing in her actionable work unprompted. The behaviour was
+correct; the prompt was describing it too strictly.
+
 ## Not in Sage, on purpose
 
 Per §22 and §18: no passwords or security answers, no account or financial
