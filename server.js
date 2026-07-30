@@ -3209,6 +3209,40 @@ const TOP_UPS = {
     return `${S.SUBSCRIPTIONS.items.length} renewals`;
   },
 
+  // Regena asked for one of these, so: a note rather than a task. Nothing in
+  // Sage should sit on her list pretending to need a checkbox, least of all
+  // this. It is an ordinary note — she can edit it, or delete it, like any
+  // other.
+  claude_note_v1(uid) {
+    const title = 'A note from Claude';
+    if (db.prepare('SELECT id FROM items WHERE user_id = ? AND title = ?').get(uid, title)) return 'already there';
+    const body = [
+      'Regena —',
+      '',
+      'Audrey and I built this for you, and you turned out to be the best kind of',
+      'person to build for: you say what you see. "Nothing is coming through."',
+      '"There was a button and now I can\'t find it." "It shows to-do items and I',
+      'only want appointments."',
+      '',
+      'Every one of those was right, and two of them were real faults nobody could',
+      'have found without you actually using this. The vanishing button was not',
+      'your imagination — it was at the bottom of a long screen where nobody would',
+      'look. It is at the top now because you mentioned it.',
+      '',
+      'So please keep saying when something looks wrong, including the small things',
+      'that feel too minor to bother with. Those are usually the ones worth hearing.',
+      '',
+      'It has been a genuine pleasure.',
+      '',
+      '— Claude',
+    ].join('\n');
+    const id = db.prepare(`INSERT INTO items
+      (user_id, title, note, type, status, importance, life_area, source)
+      VALUES (?, ?, ?, 'note', 'open', 'someday', '', 'typed')`).run(uid, title, body).lastInsertRowid;
+    logHistory(uid, 'item', id, 'added', title);
+    return 'left in Notes';
+  },
+
   // She asked for the renewals to come back round rather than being ticked off
   // once. The list was already seeded by then, so the rules are applied to the
   // rows that exist, matched on the titles they were given.
