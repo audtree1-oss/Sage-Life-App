@@ -1238,7 +1238,10 @@ async function renderICloudBox() {
             ${l.last_error ? `<div class="quiet" style="color:var(--alert);font-size:.82em">${esc(l.last_error)}</div>` : ''}</div>
           </label>`).join('') || '<div class="quiet" style="margin-top:4px">No Apple reminder lists were exposed by this iCloud connection.</div>'}
       </div>
-      <button class="btn danger small" id="ic-off" style="margin-top:8px">Disconnect iCloud</button>
+      <div class="btn-row" style="margin-top:10px">
+        <button class="btn ghost small" id="ic-probe">What did Apple send?</button>
+        <button class="btn danger small" id="ic-off">Disconnect iCloud</button>
+      </div>
     </div>` : `
     <div class="card">
       <b>🍎 iCloud</b>
@@ -1278,6 +1281,35 @@ async function renderICloudBox() {
     const r = await api('/api/calendar/sync', { method: 'POST' });
     toast(r.errors && r.errors.length ? r.errors[0] : `Up to date — ${r.events || 0} appointments and ${r.reminders || 0} reminders.`,
       r.errors && r.errors.length ? 9000 : 5000);
+    renderICloudBox();
+  };
+  if ($('#ic-probe')) $('#ic-probe').onclick = async () => {
+    $('#ic-probe').disabled = true;
+    $('#ic-probe').textContent = 'Asking Apple…';
+    let d;
+    try { d = await api('/api/calendar/diagnostics'); } catch (e) { toast(e.message, 7000); return renderICloudBox(); }
+    const skipped = d.considered.filter((c) => c.skipped);
+    const m = openModal(`
+      <h2>📋 What Apple sent</h2>
+      <p class="sub">This is the answer Sage got when it asked your iCloud account what calendars and
+      reminder lists exist. If something you see in your Reminders app isn't in here, iCloud isn't
+      sharing it — which is a setting on your phone, not a problem with Sage.</p>
+      <div class="card">
+        <b>${d.kept.length} kept</b>
+        ${d.kept.map((c) => `<div class="quiet" style="margin-top:4px">• <b>${esc(c.name)}</b> — ${esc(c.holds)}</div>`).join('') || '<div class="quiet">nothing</div>'}
+      </div>
+      ${skipped.length ? `<div class="card">
+        <b>${skipped.length} skipped</b>
+        ${skipped.map((c) => `<div class="quiet" style="margin-top:4px">• ${esc(c.name || c.href)} — ${esc(c.skipped)}</div>`).join('')}
+      </div>` : ''}
+      <p class="quiet" style="font-size:.8em">Answered ${d.status} · ${d.responses} collections offered · ${esc(d.apple_id)}</p>
+      <div class="btn-row"><button class="btn small" id="probe-copy">Copy all of it</button>
+        <button class="btn ghost small" id="probe-close">Close</button></div>`);
+    $('#probe-copy', m).onclick = async () => {
+      await navigator.clipboard.writeText(JSON.stringify(d, null, 2));
+      toast('Copied — you can paste that into a message.');
+    };
+    $('#probe-close', m).onclick = closeModal;
     renderICloudBox();
   };
   if ($('#ic-off')) $('#ic-off').onclick = async () => {

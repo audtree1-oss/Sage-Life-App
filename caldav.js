@@ -184,24 +184,42 @@ async function listCalendars(homeUrl, appleId, password) {
   const auth = `${appleId}:${password}`;
   const r = await dav(homeUrl, { method: 'PROPFIND', body: PROP_CALENDARS, depth: '1', auth });
   if (!r.ok) throw new Error(`Apple returned ${r.status} while listing calendars.`);
+  return parseCollections(r.text, homeUrl);
+}
+
+// The same PROPFIND, kept whole: what Apple sent, what was made of it, and what
+// was skipped along the way. Diagnosing this integration by reasoning about
+// what Apple *probably* returns has been wrong twice; this asks it instead.
+async function probeHome(homeUrl, appleId, password) {
+  const r = await dav(homeUrl, {
+    method: 'PROPFIND', body: PROP_CALENDARS, depth: '1', auth: `${appleId}:${password}`,
+  });
+  const seen = [];
+  const collections = r.ok ? parseCollections(r.text, homeUrl, seen) : [];
+  return { status: r.status, raw: r.text, collections, considered: seen };
+}
+
+function parseCollections(xmlText, homeUrl, considered) {
   const out = [];
-  for (const block of allBlocks(stripNs(r.text), 'response')) {
+  for (const block of allBlocks(stripNs(xmlText), 'response')) {
     const href = decodeEntities(firstValue(block, 'href'));
-    if (!href) continue;
+    const rawName = decodeEntities(firstValue(block, 'displayname')).trim();
+    const note = (why) => { if (considered) considered.push({ href, name: rawName, skipped: why }); };
+    if (!href) { note('no href'); continue; }
     const rtype = firstValue(block, 'resourcetype');
-    if (!hasElement(rtype, 'calendar')) continue;                // skip inbox/outbox/home itself
+    if (!hasElement(rtype, 'calendar')) { note(`not a calendar collection (${rtype.replace(/\s+/g, ' ').trim().slice(0, 120) || 'no resourcetype'})`); continue; }
     const comps = firstValue(block, 'supported-calendar-component-set');
     const supportsEvents = !comps || /name=["']?VEVENT["']?/i.test(comps);
     const supportsTodos = /name=["']?VTODO["']?/i.test(comps);
-    if (!supportsEvents && !supportsTodos) continue;
+    if (!supportsEvents && !supportsTodos) { note(`holds neither events nor reminders (${comps.replace(/\s+/g, ' ').trim().slice(0, 120) || 'none listed'})`); continue; }
+    note('');
     // Some collections come back with no name, or with a literal "null" that a
     // third-party app wrote years ago. Neither is a name a person can act on.
     // A name that merely *contains* those words is hers, and stays untouched.
-    const given = decodeEntities(firstValue(block, 'displayname')).trim();
-    const nameless = !given || /^(null|undefined)$/i.test(given);
+    const nameless = !rawName || /^(null|undefined)$/i.test(rawName);
     out.push({
       url: resolve(homeUrl, href),
-      name: nameless ? (supportsTodos && !supportsEvents ? 'Unnamed list' : 'Unnamed calendar') : given,
+      name: nameless ? (supportsTodos && !supportsEvents ? 'Unnamed list' : 'Unnamed calendar') : rawName,
       color: (decodeEntities(firstValue(block, 'calendar-color')) || '').slice(0, 9),
       supportsEvents,
       supportsTodos,
@@ -362,6 +380,6 @@ function inferEventKind(title) {
 }
 
 module.exports = {
-  encrypt, decrypt, discover, listCalendars, fetchEvents, fetchTodos, fetchFeed, inferEventKind,
+  encrypt, decrypt, discover, listCalendars, probeHome, fetchEvents, fetchTodos, fetchFeed, inferEventKind,
   _internals: { parseEvents, parseTodos, parseIcalDate, stripNs, unfold, calendarName, firstValue, allBlocks, hasElement },
 };
