@@ -363,6 +363,7 @@ VIEWS.more = function renderMore() {
       <button class="more-tile" data-go="lake"><span>🏞️</span>The lake</button>
       <button class="more-tile" data-go="routines"><span>📋</span>Routines</button>
       <button class="more-tile" data-go="shopping"><span>🛒</span>Shopping</button>
+      <button class="more-tile" data-go="notes"><span>📝</span>Notes</button>
       <button class="more-tile" data-go="inbox"><span>📥</span>Recent captures</button>
       <button class="more-tile" data-go="settings"><span>⚙️</span>Settings</button>
     </div>`;
@@ -509,6 +510,46 @@ VIEWS.shopping = async function renderShopping() {
   $('[data-back]').onclick = () => setView('more');
 };
 
+VIEWS.notes = async function renderNotes() {
+  const notes = await api('/api/items?type=note&status=open');
+  $('#main').innerHTML = `
+    <h1>📝 Notes</h1>
+    <p class="sub">Things worth keeping that are not tasks pretending to need a checkbox.</p>
+    <button class="btn small" id="note-new">＋ New note</button>
+    <div style="margin-top:12px">
+      ${notes.length ? notes.map((n) => `
+        <div class="card" data-note-open="${n.id}" style="cursor:pointer">
+          <b>${esc(n.title)}</b>
+          ${n.note ? `<div class="quiet" style="margin-top:5px;white-space:pre-wrap">${esc(n.note)}</div>` : ''}
+          <div style="margin-top:7px"><span class="pill grey">from ${esc(sourceLabel(n))}</span></div>
+        </div>`).join('') : '<div class="empty">No notes yet. A suspiciously clean desk.</div>'}
+    </div>
+    <button class="btn ghost small" data-back style="margin-top:16px">← More</button>`;
+  $('#note-new').onclick = () => {
+    const m = openModal(`
+      <h2>📝 New note</h2>
+      <label class="field">Title</label><input id="note-title" placeholder="What is this about?">
+      <label class="field">Note</label><textarea id="note-body" style="min-height:180px" placeholder="Put it here so it can stop living in your head."></textarea>
+      <button class="btn big" id="note-save" style="margin-top:16px">Save note</button>`);
+    $('#note-save', m).onclick = async () => {
+      const title = $('#note-title', m).value.trim();
+      const note = $('#note-body', m).value.trim();
+      if (!title && !note) return toast('Give me at least a little something to save.');
+      await api('/api/items', { method: 'POST', body: {
+        type: 'note', status: 'open', importance: 'should',
+        title: title || note.slice(0, 80), note, source: 'manual',
+      } });
+      closeModal(); toast('Note saved.'); setView('notes');
+    };
+  };
+  $$('[data-note-open]').forEach((el) => el.onclick = async () => {
+    const all = await api('/api/items?type=note&status=open');
+    const note = all.find((n) => n.id == el.dataset.noteOpen);
+    if (note) openItem(note);
+  });
+  $('[data-back]').onclick = () => setView('more');
+};
+
 VIEWS.inbox = async function renderInbox() {
   const d = await api('/api/views/inbox');
   $('#main').innerHTML = `
@@ -559,6 +600,14 @@ VIEWS.settings = async function renderSettings() {
     </div>
     <h2>🧠 Thinking layer</h2>
     <div class="card" id="ai-status"><span class="quiet">${AI_ON ? 'Checking…' : 'No key set — capture still works, just more literally.'}</span></div>
+    <div class="card">
+      <b>OpenAI account</b>
+      <p class="quiet" style="margin:4px 0 10px">Check API credits, billing, and usage on OpenAI’s secure account page.</p>
+      <div class="btn-row">
+        <a class="btn small" href="https://platform.openai.com/settings/organization/billing/overview" target="_blank" rel="noopener">Billing & credits ↗</a>
+        <a class="btn ghost small" href="https://platform.openai.com/usage" target="_blank" rel="noopener">Usage ↗</a>
+      </div>
+    </div>
     <button class="btn ghost small" data-back style="margin-top:16px">← More</button>`;
   $$('[data-text]').forEach((b) => b.onclick = () => {
     document.documentElement.dataset.text = b.dataset.text;
