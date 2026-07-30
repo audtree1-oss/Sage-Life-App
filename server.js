@@ -401,6 +401,7 @@ function ensureColumn(table, column, definition) {
   if (!cols.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 ensureColumn('items', 'ai_private', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('items', 'repeat_rule', "TEXT NOT NULL DEFAULT ''");
 ensureColumn('sage_files', 'encrypted', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('users', 'recovery_hash', "TEXT NOT NULL DEFAULT ''");
 db.prepare("UPDATE sessions SET expires_at = datetime('now', '+30 days') WHERE expires_at > datetime('now', '+30 days')").run();
@@ -1253,7 +1254,76 @@ const IMPORTANCES = ['must', 'should', 'opportunity', 'someday'];
 const ITEM_FIELDS = ['raw_capture', 'title', 'note', 'type', 'status', 'importance', 'life_area', 'location',
   'due_at', 'window_start', 'window_end', 'target_window', 'effort_min', 'project_id', 'prereq_ids',
   'next_action', 'outcome', 'event_start', 'event_end', 'prep_minutes', 'event_kind', 'attendees',
-  'store', 'purchase_rule', 'inventory_state', 'photo_file', 'eligibility', 'waiting_on', 'source', 'ai_private'];
+  'store', 'purchase_rule', 'inventory_state', 'photo_file', 'eligibility', 'waiting_on', 'source', 'ai_private',
+  'repeat_rule'];
+
+// ---------------------------------------------------------------------------
+// Things that come back round. A renewal isn't a task she finishes — it is a
+// date that arrives again, so ticking one moves it to its next date rather than
+// closing it. One row per subscription, always showing when it's next due.
+// ---------------------------------------------------------------------------
+const REPEATS = {
+  weekly: { label: 'weekly', days: 7 },
+  monthly: { label: 'monthly', months: 1 },
+  quarterly: { label: 'every 3 months', months: 3 },
+  yearly: { label: 'yearly', months: 12 },
+};
+
+const daysInMonth = (y, m) => new Date(y, m + 1, 0).getDate();
+
+// Adding a month to the 31st has to land somewhere real: the 31st of January
+// repeated monthly becomes the 28th of February, not the 3rd of March.
+function addInterval(dateStr, rule) {
+  const spec = REPEATS[rule];
+  if (!spec) return '';
+  const m = /^(\d{4})-(\d{2})-(\d{2})(T\d{2}:\d{2})?$/.exec(String(dateStr));
+  if (!m) return '';
+  const [, ys, ms, ds, time] = m;
+  let y = +ys, mo = +ms - 1, d = +ds;
+  if (spec.days) {
+    const shifted = new Date(y, mo, d + spec.days);
+    y = shifted.getFullYear(); mo = shifted.getMonth(); d = shifted.getDate();
+  } else {
+    mo += spec.months;
+    y += Math.floor(mo / 12);
+    mo = ((mo % 12) + 12) % 12;
+    d = Math.min(d, daysInMonth(y, mo));
+  }
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${y}-${pad(mo + 1)}-${pad(d)}${time || ''}`;
+}
+
+// A renewal that was missed for two years should come back on its next real
+// date, not on one that has already gone by.
+function nextOccurrence(dateStr, rule, notBefore) {
+  let next = addInterval(dateStr, rule);
+  if (!next) return '';
+  for (let i = 0; i < 200 && next.slice(0, 10) <= notBefore; i += 1) {
+    const step = addInterval(next, rule);
+    if (!step) break;
+    next = step;
+  }
+  return next;
+}
+
+// The single place an item gets ticked off, so the AI and her own thumb behave
+// identically. Returns what actually happened, for the message she sees.
+function completeItem(uid, item) {
+  const snapshot = JSON.stringify({ status: item.status, done_at: item.done_at, due_at: item.due_at });
+  const when = item.due_at || item.event_start;
+  if (item.repeat_rule && REPEATS[item.repeat_rule] && when) {
+    const next = nextOccurrence(when, item.repeat_rule, today());
+    if (next) {
+      db.prepare("UPDATE items SET due_at = ?, updated_at = datetime('now') WHERE id = ?").run(next, item.id);
+      logHistory(uid, 'item', item.id, 'done for now', `${item.title} — next on ${next.slice(0, 10)}`, 1, snapshot);
+      return { repeated: true, next };
+    }
+  }
+  db.prepare("UPDATE items SET status = 'done', done_at = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(new Date().toISOString(), item.id);
+  logHistory(uid, 'item', item.id, 'completed', item.title, 1, snapshot);
+  return { repeated: false };
+}
 
 function cleanItem(b, existing) {
   const out = {};
@@ -1331,6 +1401,14 @@ app.patch('/api/items/:id', (req, res) => {
   const existing = db.prepare('SELECT * FROM items WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
   if (!existing) return res.status(404).json({ error: 'No such item.' });
   const it = cleanItem(req.body || {}, existing);
+
+  // Ticking off something that repeats moves it on instead of closing it.
+  if (it.status === 'done' && existing.status !== 'done'
+      && Object.keys(it).every((c) => c === 'status')) {
+    const outcome = completeItem(req.user.id, existing);
+    return res.json({ ...db.prepare('SELECT * FROM items WHERE id = ?').get(existing.id), ...outcome });
+  }
+
   if (it.status === 'done' && existing.status !== 'done') it.done_at = new Date().toISOString();
   if (it.status && it.status !== 'done') it.done_at = '';
   const cols = Object.keys(it);
@@ -1659,6 +1737,11 @@ app.post('/api/history/:id/undo', (req, res) => {
   if (h.entity === 'item') {
     db.prepare(`UPDATE items SET status = ?, done_at = ?, updated_at = datetime('now') WHERE id = ? AND user_id = ?`)
       .run(snap.status || 'open', snap.done_at || '', h.entity_id, req.user.id);
+    // A repeating item was moved on to its next date rather than closed, so
+    // undo has to put the date back or that occurrence is gone for good.
+    if (snap.due_at !== undefined) {
+      db.prepare('UPDATE items SET due_at = ? WHERE id = ? AND user_id = ?').run(snap.due_at, h.entity_id, req.user.id);
+    }
   }
   db.prepare("UPDATE history SET undoable = '', detail = detail || ' (undone)' WHERE id = ?").run(h.id);
   logHistory(req.user.id, h.entity, h.entity_id, 'undone', h.detail);
@@ -2210,10 +2293,8 @@ app.post('/api/capture/apply', (req, res) => {
     } else if (p.kind === 'complete' && p.item_id) {
       const cur = db.prepare('SELECT * FROM items WHERE id = ? AND user_id = ?').get(p.item_id, uid);
       if (!cur) continue;
-      db.prepare(`UPDATE items SET status = 'done', done_at = ?, updated_at = datetime('now') WHERE id = ?`)
-        .run(new Date().toISOString(), cur.id);
-      logHistory(uid, 'item', cur.id, 'completed', cur.title, 1, JSON.stringify({ status: cur.status, done_at: cur.done_at }));
-      applied.push({ kind: 'complete', id: cur.id, title: cur.title });
+      const outcome = completeItem(uid, cur);
+      applied.push({ kind: 'complete', id: cur.id, title: cur.title, ...outcome });
     } else if (p.kind === 'update' && p.item_id && p.changes) {
       const cur = db.prepare('SELECT * FROM items WHERE id = ? AND user_id = ?').get(p.item_id, uid);
       if (!cur) continue;
@@ -3091,10 +3172,25 @@ const TOP_UPS = {
     const p = S.SUBSCRIPTIONS.project;
     const projectId = insert.run(uid, '', p.title, p.note || '', 'project', 'should', '', p.outcome || '', 0).lastInsertRowid;
     for (const i of S.SUBSCRIPTIONS.items) {
-      insert.run(uid, i.raw || '', i.title, i.note || '', 'task', i.importance || 'should', i.due_at || '', '', projectId);
+      const id = insert.run(uid, i.raw || '', i.title, i.note || '', 'task', i.importance || 'should', i.due_at || '', '', projectId).lastInsertRowid;
+      if (i.repeat) db.prepare('UPDATE items SET repeat_rule = ? WHERE id = ?').run(i.repeat, id);
     }
     logHistory(uid, 'seed', projectId, 'added', `Subscriptions list moved over — ${S.SUBSCRIPTIONS.items.length} renewals`);
     return `${S.SUBSCRIPTIONS.items.length} renewals`;
+  },
+
+  // She asked for the renewals to come back round rather than being ticked off
+  // once. The list was already seeded by then, so the rules are applied to the
+  // rows that exist, matched on the titles they were given.
+  subscriptions_repeat_v1(uid) {
+    const S = require('./seed-data');
+    const set = db.prepare("UPDATE items SET repeat_rule = ? WHERE user_id = ? AND title = ? AND repeat_rule = ''");
+    let n = 0;
+    for (const i of S.SUBSCRIPTIONS.items) {
+      if (!i.repeat) continue;
+      n += set.run(i.repeat, uid, i.title).changes;
+    }
+    return n ? `${n} renewals now repeat` : 'nothing to change';
   },
 };
 
