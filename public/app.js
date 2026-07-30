@@ -586,6 +586,7 @@ VIEWS.more = function renderMore() {
       <button class="more-tile" data-go="files"><span>📁</span>Files</button>
       <button class="more-tile" data-go="inbox"><span>📥</span>Recent captures</button>
       <button class="more-tile" data-go="settings"><span>⚙️</span>Settings</button>
+      <a class="more-tile" href="/manual.html" target="_blank" rel="noopener"><span>📖</span>How Sage works</a>
     </div>`;
   $$('[data-go]').forEach((b) => b.onclick = () => setView(b.dataset.go));
 };
