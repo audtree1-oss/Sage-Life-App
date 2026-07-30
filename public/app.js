@@ -391,8 +391,8 @@ VIEWS.now = async function renderNow() {
       <button class="btn small" id="wt-save">Save</button></div></div>`
       : `<div class="quiet center" style="margin-top:14px">Weight today: ${d.weightToday.value}</div>`}
     <div class="btn-row" style="margin-top:16px">
-      <button class="btn ghost small" id="ask-sage" style="flex:1">💬 Ask Sage something</button>
-      <button class="btn ghost small" data-goto="today" style="flex:1">All of today →</button>
+      <button class="btn ghost small" id="ask-sage" style="flex:1">💬 Ask Sage</button>
+      <button class="btn ghost small" data-goto="think" style="flex:1">💭 Think something through</button>
     </div>`;
 
   wireItems($('#main'));
@@ -468,6 +468,7 @@ VIEWS.more = function renderMore() {
     <p class="sub">Everything else Sage keeps for you.</p>
     <div class="more-grid">
       <button class="more-tile" data-go="search"><span>🔎</span>Search Sage</button>
+      <button class="more-tile" data-go="think"><span>💭</span>Thinking</button>
       <button class="more-tile" data-go="coming"><span>🔭</span>Coming up</button>
       <button class="more-tile" data-go="opportunities"><span>🌱</span>Opportunities</button>
       <button class="more-tile" data-go="projects"><span>🎯</span>Projects</button>
@@ -1392,10 +1393,152 @@ function openAsk() {
     if (!text) return;
     $('#ask-out', m).innerHTML = '<div class="empty">Thinking…</div>';
     const { answer } = await api('/api/ask', { method: 'POST', body: { text } });
-    $('#ask-out', m).innerHTML = `<div class="card" style="margin-top:14px;white-space:pre-wrap">${linkify(answer)}</div>`;
+    $('#ask-out', m).innerHTML = `<div class="card" style="margin-top:14px;white-space:pre-wrap">${linkify(answer)}</div>
+      <button class="btn ghost small" id="ask-more" style="margin-top:10px">Keep talking about this →</button>`;
+    $('#ask-more', m).onclick = async () => {
+      const th = await api('/api/threads', { method: 'POST', body: { kind: 'thinking' } });
+      closeModal();
+      OPEN_THREAD = th.id;
+      PENDING_FIRST = text;
+      setView('think');
+    };
   };
   $('#ask-go', m).onclick = go;
   $('#ask-q', m).addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
+}
+
+// ---------------------------------------------------------------------------
+// THINKING — a place to muse, decide, or empty her head at bedtime.
+// Nothing said here becomes a task unless she asks for it.
+// ---------------------------------------------------------------------------
+let OPEN_THREAD = null;
+let PENDING_FIRST = null;
+
+VIEWS.think = async function renderThink() {
+  if (OPEN_THREAD) return renderThread(OPEN_THREAD);
+  const threads = await api('/api/threads');
+  $('#main').innerHTML = `
+    <h1>💭 Thinking</h1>
+    <p class="sub">Somewhere to talk it through — or just put it down for the night.</p>
+    <button class="btn big" id="th-new">💭 Think something through</button>
+    <button class="btn big quietbtn" id="th-bed">🌙 Bedtime brain dump<br>
+      <small style="font-weight:400">Say it all. No advice, no planning — just held until morning.</small></button>
+    ${threads.length ? '<h2>Earlier</h2>' : ''}
+    ${threads.map((t) => `
+      <div class="row" data-thread="${t.id}">
+        <span style="font-size:1.2em;margin-top:1px">${t.kind === 'bedtime' ? '🌙' : '💭'}</span>
+        <div class="body">
+          <div class="title">${esc(t.title || 'Untitled')}</div>
+          <div class="meta">${fmtDate(t.last_at.slice(0, 10))} · ${t.message_count} message${t.message_count === 1 ? '' : 's'}</div>
+        </div>
+        <span class="chev">›</span>
+      </div>`).join('')}
+    ${!threads.length ? '<div class="empty">Nothing yet. Anything on your mind is a fine place to start.</div>' : ''}
+    <button class="btn ghost small" data-back style="margin-top:16px">← More</button>`;
+  $('#th-new').onclick = async () => {
+    const t = await api('/api/threads', { method: 'POST', body: { kind: 'thinking' } });
+    OPEN_THREAD = t.id; setView('think');
+  };
+  $('#th-bed').onclick = async () => {
+    const t = await api('/api/threads', { method: 'POST', body: { kind: 'bedtime' } });
+    OPEN_THREAD = t.id; setView('think');
+  };
+  $$('[data-thread]').forEach((r) => r.onclick = () => { OPEN_THREAD = +r.dataset.thread; setView('think'); });
+  $('[data-back]').onclick = () => { OPEN_THREAD = null; setView('more'); };
+};
+
+async function renderThread(id) {
+  const t = await api(`/api/threads/${id}`);
+  const bedtime = t.kind === 'bedtime';
+  $('#main').innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px">
+      <button class="btn ghost small" id="th-back">←</button>
+      <h1 style="flex:1;font-size:1.15em;margin:0">${bedtime ? '🌙 Bedtime' : '💭 ' + esc(t.title || 'Thinking')}</h1>
+    </div>
+    ${bedtime ? '<p class="sub" style="margin-top:10px">Everything you say is held. Nothing to decide tonight.</p>' : ''}
+    <div id="th-messages" style="margin-top:14px">
+      ${t.messages.map(messageBubble).join('') || `<div class="empty">${bedtime ? 'What’s rattling around? Say it and let it go.' : 'What’s on your mind?'}</div>`}
+    </div>
+    <div class="card" style="position:sticky;bottom:96px;margin-top:14px">
+      <textarea id="th-input" placeholder="${bedtime ? 'Anything at all…' : 'Say what you’re thinking…'}" style="min-height:80px"></textarea>
+      <div class="btn-row" style="margin-top:8px">
+        <button class="btn quietbtn small" id="th-voice">🎤 Talk</button>
+        <button class="btn" id="th-send" style="flex:1">Send</button>
+      </div>
+    </div>
+    ${!bedtime && t.messages.length >= 2 ? `
+      <button class="btn ghost small" id="th-harvest" style="margin-top:10px">✓ Anything here I should keep?</button>
+      <p class="quiet" style="font-size:.8em;margin-top:6px">Nothing from a conversation becomes a task unless you say so.</p>` : ''}
+    ${t.messages.length ? '<button class="btn danger small" id="th-del" style="margin-top:16px">Delete this conversation</button>' : ''}`;
+
+  $('#th-back').onclick = () => { OPEN_THREAD = null; setView('think'); };
+  wireVoice($('#th-voice'), $('#th-input'));
+  const send = async () => {
+    const text = $('#th-input').value.trim();
+    if (!text) return;
+    $('#th-input').value = '';
+    $('#th-messages').insertAdjacentHTML('beforeend', messageBubble({ role: 'her', content: text }));
+    $('#th-messages').insertAdjacentHTML('beforeend', '<div class="bubble sage pending" id="th-pending"><span class="quiet">…</span></div>');
+    window.scrollTo(0, document.body.scrollHeight);
+    try {
+      const { reply } = await api(`/api/threads/${id}/message`, { method: 'POST', body: { text } });
+      $('#th-pending').outerHTML = messageBubble({ role: 'sage', content: reply });
+      window.scrollTo(0, document.body.scrollHeight);
+    } catch (e) {
+      $('#th-pending').outerHTML = messageBubble({ role: 'sage', content: e.message });
+    }
+  };
+  $('#th-send').onclick = send;
+  if ($('#th-harvest')) $('#th-harvest').onclick = () => harvestThread(id);
+  if ($('#th-del')) $('#th-del').onclick = async () => {
+    if (!confirm('Delete this conversation?')) return;
+    await api(`/api/threads/${id}`, { method: 'DELETE' });
+    OPEN_THREAD = null; setView('think');
+  };
+  if (PENDING_FIRST) { $('#th-input').value = PENDING_FIRST; PENDING_FIRST = null; send(); }
+  window.scrollTo(0, document.body.scrollHeight);
+}
+
+function messageBubble(m) {
+  return `<div class="bubble ${m.role === 'her' ? 'her' : 'sage'}">${esc(m.content).replace(/\n/g, '<br>')}</div>`;
+}
+
+async function harvestThread(id) {
+  const m = openModal('<h2>✓ Anything to keep?</h2><div class="empty">Reading it back…</div>');
+  const addClose = () => {
+    const c = document.createElement('button');
+    c.className = 'close'; c.textContent = '✕'; c.onclick = closeModal;
+    m.prepend(c);
+  };
+  const r = await api(`/api/threads/${id}/harvest`, { method: 'POST' });
+  if (!r.proposals.length) {
+    m.innerHTML = `<h2>✓ Anything to keep?</h2>
+      <div class="card">${esc(r.reply || 'Nothing in there was a commitment — just thinking. That’s allowed.')}</div>`;
+    addClose();
+    return;
+  }
+  m.innerHTML = `<h2>✓ Anything to keep?</h2>
+    ${r.reply ? `<div class="card sage">${esc(r.reply)}</div>` : ''}
+    <p class="sub">Only what you tick gets saved.</p>
+    <div id="cap-out">${r.proposals.map(proposalCard).join('')}</div>
+    <button class="btn big" id="hv-save">Keep the ticked ones</button>`;
+  addClose();
+  $('#hv-save', m).onclick = async () => {
+    const chosen = [];
+    for (const card of $$('[data-prop]', m)) {
+      if (!$('input[type=checkbox]', card).checked) continue;
+      const p = { ...r.proposals[+card.dataset.prop] };
+      if (p.kind === 'item') {
+        p.item = { ...p.item };
+        for (const f of $$('[data-f]', card)) p.item[f.dataset.f] = f.value;
+      }
+      chosen.push(p);
+    }
+    if (!chosen.length) { closeModal(); return toast('Nothing saved.'); }
+    const { applied } = await api('/api/capture/apply', { method: 'POST', body: { raw: '', proposals: chosen } });
+    closeModal();
+    toast(applied.length === 1 ? 'Kept it.' : `Kept ${applied.length}.`);
+  };
 }
 
 boot();

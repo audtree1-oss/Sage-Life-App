@@ -268,6 +268,26 @@ CREATE TABLE IF NOT EXISTS history (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Thinking out loud. Threads are conversation, NOT a second source of truth:
+-- nothing said here becomes a task until she asks. That invariant is the
+-- point — musing must not manufacture obligations (spec §2).
+CREATE TABLE IF NOT EXISTS threads (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  title TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT 'thinking',   -- thinking | bedtime
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS messages (
+  id INTEGER PRIMARY KEY,
+  thread_id INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+  role TEXT NOT NULL,                      -- her | sage
+  content TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id, id);
+
 -- iCloud calendar, read-only. The credential is an app-specific password,
 -- encrypted at rest, revocable from appleid.apple.com without touching Sage.
 CREATE TABLE IF NOT EXISTS cal_account (
@@ -744,11 +764,13 @@ How you behave:
 - Her goal is lower cognitive load and fewer forgotten commitments, not maximum productivity, and not a smaller life.`;
 
 let LAST_AI_ERROR = '';
-async function askAI(system, user, { maxTokens = 1200, json = false, tier = 'fast' } = {}) {
+async function askAI(system, user, { maxTokens = 1200, json = false, tier = 'fast', history = [] } = {}) {
   if (!AI_API_KEY) return null;
   LAST_AI_ERROR = '';
   const models = await resolveModels();
   const model = models[tier] || models.fast;
+  // Thinking is a conversation, so earlier turns travel with the request.
+  const prior = history.map((m) => ({ role: m.role === 'sage' ? 'assistant' : 'user', content: String(m.content) }));
   try {
     let url, headers, body;
     if (AI_PROVIDER === 'openai') {
@@ -756,7 +778,7 @@ async function askAI(system, user, { maxTokens = 1200, json = false, tier = 'fas
       headers = { 'authorization': `Bearer ${AI_API_KEY}`, 'content-type': 'application/json' };
       body = {
         model, max_completion_tokens: maxTokens,
-        messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+        messages: [{ role: 'system', content: system }, ...prior, { role: 'user', content: user }],
         // GPT-5's completion budget includes its invisible reasoning tokens.
         // Low effort leaves room for the short, visible answers Sage needs.
         ...(/^gpt-5/i.test(model) ? { reasoning_effort: 'low' } : {}),
@@ -765,7 +787,7 @@ async function askAI(system, user, { maxTokens = 1200, json = false, tier = 'fas
     } else {
       url = 'https://api.anthropic.com/v1/messages';
       headers = { 'x-api-key': AI_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' };
-      body = { model, max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }] };
+      body = { model, max_tokens: maxTokens, system, messages: [...prior, { role: 'user', content: user }] };
     }
     const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
     if (!r.ok) {
@@ -1963,6 +1985,144 @@ app.get('/api/ai/context', async (req, res) => {
       totalOpen: selection.relevantItems.length + selection.notShown,
       approxChars: JSON.stringify(selection).length },
   });
+});
+
+// ---------------------------------------------------------------------------
+// THINKING — somewhere to muse, decide, or empty her head at bedtime.
+//
+// The hard rule: a thread is conversation, never a second source of truth.
+// Nothing said here becomes a task until she explicitly asks. Thinking out
+// loud must not manufacture obligations — "possibility should not
+// automatically become obligation" is her own principle, and an assistant
+// that turns every musing into a to-do makes musing unsafe.
+// ---------------------------------------------------------------------------
+const THINKING_PERSONA = SAGE_PERSONA + `
+
+Right now you are thinking WITH her, not managing anything.
+- This is conversation. Do not produce task lists, do not assign actions, and do not end every reply with a suggestion.
+- Often the most useful reply is one good question, and then nothing else.
+- If she is working a decision, help her see it: what is actually being traded off, what she already knows, where she may be rationalizing. Say the uncomfortable thing kindly when it is true.
+- Do not push her toward doing more. "Could improve" is not "needs improvement."
+- Two to six sentences unless she clearly wants more. She reads on a phone, in large text.
+- If something genuinely needs remembering, say so once, plainly, and leave it — she can ask you to keep it.`;
+
+const BEDTIME_PERSONA = SAGE_PERSONA + `
+
+It is bedtime and she is emptying her head so she can sleep. This is a holding pen, not a planning session.
+- Acknowledge what she said in ONE short line. Confirm you have it.
+- No advice. No questions. No next steps. No lists. Nothing to decide.
+- Never suggest doing anything tonight.
+- Warmth is welcome; problem-solving is not. It will all still be there tomorrow, and you are holding it so she does not have to.`;
+
+function threadWithCount(t) {
+  const row = db.prepare('SELECT COUNT(*) AS n, MAX(created_at) AS last FROM messages WHERE thread_id = ?').get(t.id);
+  const first = db.prepare("SELECT content FROM messages WHERE thread_id = ? AND role = 'her' ORDER BY id LIMIT 1").get(t.id);
+  return { ...t, message_count: row.n, last_at: row.last || t.created_at, preview: first ? first.content.slice(0, 120) : '' };
+}
+
+app.get('/api/threads', (req, res) => {
+  res.json(db.prepare('SELECT * FROM threads WHERE user_id = ? ORDER BY updated_at DESC LIMIT 100')
+    .all(req.user.id).map(threadWithCount));
+});
+
+app.post('/api/threads', (req, res) => {
+  const kind = ['thinking', 'bedtime'].includes((req.body || {}).kind) ? req.body.kind : 'thinking';
+  const info = db.prepare('INSERT INTO threads (user_id, title, kind) VALUES (?, ?, ?)')
+    .run(req.user.id, String((req.body || {}).title || '').slice(0, 120), kind);
+  res.json(threadWithCount(db.prepare('SELECT * FROM threads WHERE id = ?').get(info.lastInsertRowid)));
+});
+
+app.get('/api/threads/:id', (req, res) => {
+  const t = db.prepare('SELECT * FROM threads WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
+  if (!t) return res.status(404).json({ error: 'No such conversation.' });
+  res.json({ ...t, messages: db.prepare('SELECT * FROM messages WHERE thread_id = ? ORDER BY id').all(t.id) });
+});
+
+app.patch('/api/threads/:id', (req, res) => {
+  const t = db.prepare('SELECT * FROM threads WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
+  if (!t) return res.status(404).json({ error: 'No such conversation.' });
+  db.prepare('UPDATE threads SET title = ? WHERE id = ?').run(String((req.body || {}).title || t.title).slice(0, 120), t.id);
+  res.json({ ok: true });
+});
+
+app.delete('/api/threads/:id', (req, res) => {
+  db.prepare('DELETE FROM threads WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
+  res.json({ ok: true });
+});
+
+app.post('/api/threads/:id/message', async (req, res) => {
+  const uid = req.user.id;
+  const t = db.prepare('SELECT * FROM threads WHERE id = ? AND user_id = ?').get(req.params.id, uid);
+  if (!t) return res.status(404).json({ error: 'No such conversation.' });
+  const text = String((req.body || {}).text || '').slice(0, 4000).trim();
+  if (!text) return res.status(400).json({ error: 'Say something first.' });
+
+  db.prepare("INSERT INTO messages (thread_id, role, content) VALUES (?, 'her', ?)").run(t.id, text);
+
+  // Recent turns for continuity; retrieval for what her life actually holds.
+  const history = db.prepare('SELECT role, content FROM messages WHERE thread_id = ? ORDER BY id DESC LIMIT 13')
+    .all(t.id).reverse().slice(0, -1);
+  const ctx = await buildContext(uid);
+  const bedtime = t.kind === 'bedtime';
+  // Bedtime gets no retrieval at all — nothing about her open tasks belongs
+  // in that room at 11pm.
+  const selection = bedtime ? null
+    : selectContext(uid, ctx, { text, budget: 20, routines: await activeRoutines(uid, ctx.date, ctx) });
+
+  let reply = await askAI(
+    bedtime ? BEDTIME_PERSONA : THINKING_PERSONA,
+    bedtime ? text : `${text}\n\n[Her life, for context only — do not turn this into a task list:]\n${JSON.stringify(selection)}`,
+    { maxTokens: bedtime ? 120 : 700, tier: 'smart', history },
+  );
+  if (!reply) {
+    reply = bedtime
+      ? 'Got it. It’s written down — you can stop holding it.'
+      : 'The thinking layer isn’t connected right now, so I can’t think this through with you — but what you said is saved here.';
+  }
+  db.prepare("INSERT INTO messages (thread_id, role, content) VALUES (?, 'sage', ?)").run(t.id, reply);
+
+  if (!t.title) {
+    const auto = text.replace(/\s+/g, ' ').trim().slice(0, 60);
+    db.prepare('UPDATE threads SET title = ? WHERE id = ?').run(auto + (text.length > 60 ? '…' : ''), t.id);
+  }
+  db.prepare("UPDATE threads SET updated_at = datetime('now') WHERE id = ?").run(t.id);
+  res.json({ reply, thread: threadWithCount(db.prepare('SELECT * FROM threads WHERE id = ?').get(t.id)) });
+});
+
+// Only when she asks: pull real commitments out of a conversation. Proposals
+// only — she still approves each one, exactly like capture.
+app.post('/api/threads/:id/harvest', async (req, res) => {
+  const uid = req.user.id;
+  const t = db.prepare('SELECT * FROM threads WHERE id = ? AND user_id = ?').get(req.params.id, uid);
+  if (!t) return res.status(404).json({ error: 'No such conversation.' });
+  const msgs = db.prepare('SELECT role, content FROM messages WHERE thread_id = ? ORDER BY id').all(t.id);
+  if (!msgs.length) return res.json({ proposals: [], reply: 'Nothing in this one yet.' });
+  const ctx = await buildContext(uid);
+
+  const ai = await askAI(
+    SAGE_PERSONA + `
+
+Read a conversation and pull out ONLY what she actually decided to do. Reply ONLY with JSON: {"reply": string, "proposals": [...]}.
+Proposal shapes match capture: {"kind":"item","confidence":"high"|"low","item":{...}} and {"kind":"complete","item_id":123,"why":""}.
+Be strict and conservative:
+- A thought is not a commitment. Wondering, weighing, or "maybe someday" is NOT a task.
+- Only include something she clearly settled on.
+- If she settled on nothing, return an empty proposals array and say so plainly. That is a good outcome, not a failure.
+- Anything tentative goes in as importance "opportunity" or "someday", never "must".`,
+    `Conversation:\n${msgs.map((m) => `${m.role === 'her' ? 'Regena' : 'Sage'}: ${m.content}`).join('\n')}\n\nHer current state:\n${JSON.stringify(selectContext(uid, ctx, { text: msgs.map((m) => m.content).join(' '), budget: 15 }))}`,
+    { maxTokens: 1200, json: true, tier: 'smart' },
+  );
+  const parsed = safeJSON(ai || '', null);
+  if (!parsed || !Array.isArray(parsed.proposals)) {
+    return res.json({ proposals: [], reply: 'I couldn’t pick anything out with confidence — nothing saved.' });
+  }
+  for (const p of parsed.proposals) {
+    if (p.kind === 'complete' && p.item_id) {
+      p.target = db.prepare('SELECT id, title, status FROM items WHERE id = ? AND user_id = ?').get(p.item_id, uid) || null;
+      if (!p.target) p.kind = 'invalid';
+    }
+  }
+  res.json({ reply: String(parsed.reply || ''), proposals: parsed.proposals.filter((p) => p.kind !== 'invalid') });
 });
 
 // Ask Sage something about her own state — reasoning over the database.
