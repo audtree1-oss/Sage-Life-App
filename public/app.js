@@ -333,13 +333,15 @@ function wireItems(root) {
 
 // On NOW the routine starts collapsed to one line, so the screen stays scannable
 // (spec §7: immediate items, roughly one iPhone screen). Tap opens it in place.
-function routineBlock(r, { collapsed = false } = {}) {
+// `bare` drops the title row, for screens that have already named the routine
+// directly above it — repeating the name there reads like two routines.
+function routineBlock(r, { collapsed = false, bare = false } = {}) {
   return `
     <div class="routine-block ${collapsed ? 'collapsed' : ''}" data-routine="${r.id}">
-      <div class="routine-head" data-toggle="${r.id}">
+      ${bare ? '' : `<div class="routine-head" data-toggle="${r.id}">
         <span>${r.emoji || '📋'} ${esc(r.name)}</span>
         <span class="count">${r.complete ? 'done ✓' : `${r.remaining} left`}${collapsed ? ' <span class="caret">›</span>' : ''}</span>
-      </div>
+      </div>`}
       ${r.steps.map((s) => `
         <div class="row flat ${s.done ? 'done' : ''}">
           <button class="tick ${s.done ? 'on' : ''}" data-step="${r.id}:${s.id}" aria-label="Check off">${s.done ? '✓' : ''}</button>
@@ -462,7 +464,7 @@ VIEWS.now = async function renderNow() {
           <p class="morning-line">Nothing else needs you yet.</p>`
           : `<p class="morning-line">${esc(d.morning.line)}</p>`}
         <button class="btn big quietbtn" id="m-open" style="margin-top:26px">When you're ready, let's look at the day →</button>
-        ${!d.weightToday ? `<div class="btn-row" style="justify-content:center;margin-top:6px">
+        ${!d.weightToday && d.weighInHere !== false ? `<div class="btn-row" style="justify-content:center;margin-top:6px">
           <input type="text" inputmode="decimal" id="wt" placeholder="150.0" style="max-width:110px;text-align:center">
           <button class="btn ghost small" id="wt-save">Log it</button></div>` : ''}
       </div>`;
@@ -504,10 +506,12 @@ VIEWS.now = async function renderNow() {
     ${d.reminders.length ? `<h2>⏰ Apple Reminders</h2>${d.reminders.map((i) => itemRow(i)).join('')}` : ''}
     <div id="now-routines">${d.routines.map((r) => routineBlock(r, { collapsed: r.steps.length > 3 })).join('')}</div>
     ${!d.immediate.length && !d.routines.length && !bits.length ? '<div class="empty">Clear. Genuinely clear.</div>' : ''}
-    ${!d.weightToday ? `<div class="card"><b>Weight today?</b><div class="btn-row" style="margin-top:8px">
+    ${d.weightToday ? `<div class="quiet center" style="margin-top:14px">Weight today: ${d.weightToday.value}</div>`
+      : d.weighInHere === false
+        ? `<div class="quiet center" style="margin-top:14px">No weigh-in at ${esc(d.awayAt || 'the lake')} — the scale is at home.</div>`
+        : `<div class="card"><b>Weight today?</b><div class="btn-row" style="margin-top:8px">
       <input type="text" inputmode="decimal" id="wt" placeholder="150.0" style="flex:1">
-      <button class="btn small" id="wt-save">Save</button></div></div>`
-      : `<div class="quiet center" style="margin-top:14px">Weight today: ${d.weightToday.value}</div>`}
+      <button class="btn small" id="wt-save">Save</button></div></div>`}
     <div class="btn-row" style="margin-top:16px">
       <button class="btn ghost small" id="ask-sage" style="flex:1">💬 Ask Sage</button>
       <button class="btn ghost small" data-goto="think" style="flex:1">💭 Think something through</button>
@@ -773,21 +777,173 @@ VIEWS.routines = async function renderRoutines() {
   const all = await api('/api/routines?all=1');
   const active = await api('/api/routines');
   const activeIds = new Set(active.map((r) => r.id));
+  const byId = new Map(active.map((r) => [r.id, r]));
   $('#main').innerHTML = `
     <h1>📋 Routines</h1>
-    <p class="sub">All of them. Today's are marked — the rest are waiting for their moment.</p>
+    <p class="sub">All of them, whether or not today is their day. Tap one to change it.</p>
+    <button class="btn small" id="rt-new">＋ New routine</button>
+    <div style="margin-top:12px">
     ${all.map((r) => `
       <div class="card">
         <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
           <b>${r.emoji || '📋'} ${esc(r.name)}</b>
-          ${activeIds.has(r.id) ? '<span class="pill">today</span>' : '<span class="pill grey">not today</span>'}
+          ${activeIds.has(r.id)
+            ? `<span class="pill">${byId.get(r.id).complete ? 'done today ✓' : `${byId.get(r.id).remaining} left today`}</span>`
+            : '<span class="pill grey">not today</span>'}
         </div>
         <div class="quiet" style="margin-top:2px">${esc(describeTrigger(r))}</div>
-        <div class="quiet" style="margin-top:6px">${r.steps.map((s) => esc(s.text)).join(' · ')}</div>
-      </div>`).join('')}
+        ${activeIds.has(r.id)
+          ? routineBlock(byId.get(r.id), { bare: true })
+          : `<ol class="quiet" style="margin:8px 0 0 -14px;line-height:1.6">${r.steps.map((st) => `<li>${esc(st.text)}</li>`).join('') || '<li>No steps yet.</li>'}</ol>`}
+        <button class="btn ghost small" data-rt-edit="${r.id}" style="margin-top:10px">Change this routine</button>
+      </div>`).join('') || '<div class="empty">No routines yet.</div>'}
+    </div>
     <button class="btn ghost small" data-back style="margin-top:16px">← More</button>`;
+  wireRoutines($('#main'));
+  $('#rt-new').onclick = () => openRoutine(null);
+  $$('[data-rt-edit]').forEach((b) => b.onclick = () => {
+    openRoutine(all.find((r) => r.id === +b.dataset.rtEdit));
+  });
   $('[data-back]').onclick = () => setView('more');
 };
+
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+// The trigger kinds worth offering her in plain words. Weather-driven ones stay
+// as they were seeded — they are real, just not something to invent from a form.
+const WHENS = {
+  daily: 'Every day',
+  weekly: 'Certain days of the week',
+  seasonal: 'Certain months of the year',
+  location: 'Only when I am somewhere',
+  event: 'Before something happens',
+  flexible: 'Whenever it suits — never overdue',
+};
+
+async function openRoutine(r) {
+  const isNew = !r;
+  const cfg = (r && r.config) || {};
+  const sup = r ? (typeof r.suppress_if === 'string' ? JSON.parse(r.suppress_if || '{}') : (r.suppress_if || {})) : {};
+  const locations = await api('/api/locations').catch(() => []);
+  const steps = (r && r.steps.map((s) => s.text)) || [''];
+
+  const m = openModal(`
+    <h2>${isNew ? '📋 New routine' : 'Change this routine'}</h2>
+    <p class="sub">A routine is a short list you work through — it comes back when its moment comes round.</p>
+    <div class="btn-row">
+      <div style="width:88px"><label class="field">Icon</label>
+        <input type="text" id="rt-emoji" maxlength="3" value="${esc((r && r.emoji) || '📋')}" style="text-align:center"></div>
+      <div style="flex:1"><label class="field">Name</label>
+        <input type="text" id="rt-name" value="${esc((r && r.name) || '')}" placeholder="e.g. Opening the lake house"></div>
+    </div>
+
+    <label class="field">When does it come round?</label>
+    <select id="rt-when">${Object.entries(WHENS).map(([v, l]) =>
+      `<option value="${v}" ${v === ((r && r.trigger_type) || 'daily') ? 'selected' : ''}>${l}</option>`).join('')}</select>
+
+    <div id="rt-when-detail" style="margin-top:10px"></div>
+
+    <label class="field">Time of day</label>
+    <select id="rt-tod">${[['', 'Any time'], ['morning', 'Morning'], ['evening', 'Evening']].map(([v, l]) =>
+      `<option value="${v}" ${v === (cfg.time_of_day || '') ? 'selected' : ''}>${l}</option>`).join('')}</select>
+
+    <label class="row flat" style="align-items:flex-start;cursor:pointer;margin-top:12px">
+      <input type="checkbox" id="rt-away" ${sup.on_trip ? 'checked' : ''} style="transform:scale(1.25);margin-top:6px">
+      <div class="body"><div class="title" style="font-weight:500">Skip it while I'm away</div>
+      <div class="quiet" style="font-size:.82em">Nothing at home should ask for you from the lake.</div></div>
+    </label>
+
+    <label class="field">Note about how often (optional)</label>
+    <input type="text" id="rt-note" value="${esc((r && r.cadence_note) || '')}" placeholder="e.g. Roughly weekly, no particular day">
+
+    <label class="field">Steps</label>
+    <div id="rt-steps"></div>
+    <button class="btn ghost small" id="rt-addstep" style="margin-top:8px">＋ Add a step</button>
+
+    <div class="btn-row" style="margin-top:18px">
+      <button class="btn" id="rt-save" style="flex:2">${isNew ? 'Make the routine' : 'Save'}</button>
+    </div>
+    ${isNew ? '' : '<button class="btn danger small" id="rt-del" style="margin-top:10px">Delete this routine</button>'}`);
+
+  // --- the "when" detail changes with the kind chosen -----------------------
+  const drawDetail = () => {
+    const kind = $('#rt-when', m).value;
+    const box = $('#rt-when-detail', m);
+    if (kind === 'weekly') {
+      box.innerHTML = `<div class="seg">${DAY_NAMES.map((d, i) =>
+        `<button type="button" data-day="${i}" class="${(cfg.days || []).includes(i) ? 'on' : ''}">${d}</button>`).join('')}</div>`;
+      $$('[data-day]', box).forEach((b) => b.onclick = () => b.classList.toggle('on'));
+    } else if (kind === 'seasonal') {
+      box.innerHTML = `<div class="seg wrap">${MONTH_NAMES.map((mn, i) =>
+        `<button type="button" data-month="${i + 1}" class="${(cfg.months || []).includes(i + 1) ? 'on' : ''}">${mn}</button>`).join('')}</div>`;
+      $$('[data-month]', box).forEach((b) => b.onclick = () => b.classList.toggle('on'));
+    } else if (kind === 'location') {
+      box.innerHTML = `<select id="rt-loc">${locations.map((l) =>
+        `<option value="${esc(l.key)}" ${l.key === cfg.location ? 'selected' : ''}>${l.emoji || ''} ${esc(l.name)}</option>`).join('')}</select>`;
+    } else if (kind === 'event') {
+      box.innerHTML = `<select id="rt-event">${[
+        ['trip_departure', 'Before leaving on a trip'],
+        ['hosting', 'Before company comes'],
+      ].map(([v, l]) => `<option value="${v}" ${v === cfg.event ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
+    } else {
+      box.innerHTML = '';
+    }
+  };
+  $('#rt-when', m).onchange = drawDetail;
+  drawDetail();
+
+  // --- steps ---------------------------------------------------------------
+  const drawSteps = () => {
+    $('#rt-steps', m).innerHTML = steps.map((t, i) => `
+      <div class="btn-row" style="margin-top:6px">
+        <input type="text" data-step-i="${i}" value="${esc(t)}" placeholder="What happens at this step?" style="flex:1">
+        <button class="btn ghost small" data-step-del="${i}" aria-label="Remove step">✕</button>
+      </div>`).join('');
+    $$('[data-step-i]', m).forEach((inp) => inp.oninput = () => { steps[+inp.dataset.stepI] = inp.value; });
+    $$('[data-step-del]', m).forEach((b) => b.onclick = () => {
+      steps.splice(+b.dataset.stepDel, 1);
+      if (!steps.length) steps.push('');
+      drawSteps();
+    });
+  };
+  drawSteps();
+  $('#rt-addstep', m).onclick = () => { steps.push(''); drawSteps(); $$('[data-step-i]', m).pop().focus(); };
+
+  // --- save ----------------------------------------------------------------
+  $('#rt-save', m).onclick = async () => {
+    const name = $('#rt-name', m).value.trim();
+    if (!name) return toast('Give it a name first.');
+    const kind = $('#rt-when', m).value;
+    const config = {};
+    if (kind === 'weekly') config.days = $$('[data-day].on', m).map((b) => +b.dataset.day);
+    if (kind === 'seasonal') config.months = $$('[data-month].on', m).map((b) => +b.dataset.month);
+    if (kind === 'location' && $('#rt-loc', m)) config.location = $('#rt-loc', m).value;
+    if (kind === 'event' && $('#rt-event', m)) config.event = $('#rt-event', m).value;
+    const tod = $('#rt-tod', m).value;
+    if (tod) config.time_of_day = tod;
+    if (cfg.after_hour) config.after_hour = cfg.after_hour;
+    if (kind === 'weekly' && !config.days.length) return toast('Pick at least one day.');
+    if (kind === 'seasonal' && !config.months.length) return toast('Pick at least one month.');
+
+    const body = {
+      name, emoji: $('#rt-emoji', m).value.trim() || '📋',
+      trigger_type: kind, trigger_config: config,
+      suppress_if: { ...sup, on_trip: $('#rt-away', m).checked ? true : undefined },
+      cadence_note: $('#rt-note', m).value.trim(),
+      steps: steps.map((t) => t.trim()).filter(Boolean),
+    };
+    if (!body.suppress_if.on_trip) delete body.suppress_if.on_trip;
+    await api(r ? `/api/routines/${r.id}` : '/api/routines', { method: r ? 'PATCH' : 'POST', body });
+    closeModal();
+    toast(r ? 'Saved.' : `“${name}” is ready.`);
+    setView('routines');
+  };
+  if ($('#rt-del', m)) $('#rt-del', m).onclick = async () => {
+    if (!confirm(`Delete “${r.name}”? The routine and its steps go for good.`)) return;
+    await api(`/api/routines/${r.id}`, { method: 'DELETE' });
+    closeModal(); toast('Deleted.'); setView('routines');
+  };
+}
 
 function describeTrigger(r) {
   const c = r.config || {};

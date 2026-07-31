@@ -1813,6 +1813,12 @@ app.get('/api/views/now', async (req, res) => {
   const immediate = [...p.overdue, ...p.dueToday].sort((a, b) => scoreItem(b) - scoreItem(a)).slice(0, 6);
   const reminders = ctx.reminders.filter((r) => r.due_at && r.due_at.slice(0, 10) <= date).slice(0, 8);
   const weightToday = db.prepare("SELECT * FROM tracking WHERE user_id = ? AND kind = 'weight' AND date = ?").get(uid, date) || null;
+  // The scale is at home. Asking her to weigh in at the lake is asking for
+  // something she cannot do, which is the one thing this app is meant not to
+  // do. She can still log one by telling Sage the number.
+  const homeKey = db.prepare("SELECT value FROM preferences WHERE user_id = ? AND key = 'home_location'").get(uid)?.value
+    || (ctx.locations.find((l) => l.is_home) || {}).key || 'evans';
+  const weighInHere = ctx.hereKey === homeKey;
 
   res.json({
     date, hour,
@@ -1821,7 +1827,7 @@ app.get('/api/views/now', async (req, res) => {
     activeTrip: ctx.activeTrip, upcomingTrip: ctx.upcomingTrip,
     events: p.events, nextEvent,
     immediate, reminders, routines: timely,
-    weightToday,
+    weightToday, weighInHere, awayAt: weighInHere ? '' : (ctx.here?.name || 'away'),
     morning: morningOpening(uid, ctx, { hour, nextEvent, overdue: p.overdue }),
     counts: { open: p.all.length, overdue: p.overdue.length, blocked: p.blocked.length },
   });

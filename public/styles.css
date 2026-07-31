@@ -203,6 +203,9 @@ input:focus, textarea:focus, select:focus { border-color: var(--sage); }
 .seg { display: flex; gap: 6px; background: var(--line); padding: 4px; border-radius: 13px; margin-bottom: 14px; }
 .seg button { flex: 1; border: none; background: transparent; border-radius: 10px; padding: 9px 4px; font-size: .82em; color: var(--ink-soft); font-weight: 600; }
 .seg button.on { background: var(--card); color: var(--ink); box-shadow: var(--shadow); }
+/* Twelve months will not sit in one row on a phone; four to a line reads well. */
+.seg.wrap { flex-wrap: wrap; }
+.seg.wrap button { flex: 0 0 calc(25% - 5px); }
 .daybox { border-left: 3px solid var(--line); padding-left: 12px; margin-bottom: 16px; }
 .daybox.today { border-left-color: var(--sage-deep); }
 .daybox h3 { margin: 0 0 6px; font-size: .92em; }
