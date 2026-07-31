@@ -504,7 +504,50 @@ const APPLE_TOUCH_ICON = Buffer.from(
 app.get('/apple-touch-icon.png', (req, res) => {
   res.set({ 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' }).send(APPLE_TOUCH_ICON);
 });
-app.use(express.static(path.join(__dirname, 'public')));
+// ---------------------------------------------------------------------------
+// Making a new version actually arrive on her phone.
+//
+// Safari will happily keep serving yesterday's app.js from its own cache, and
+// nothing on screen tells her which version she is looking at. So: the page is
+// always revalidated, the assets carry a build stamp in their URL, and Settings
+// shows that stamp so "did it update?" is a question she can answer herself.
+// ---------------------------------------------------------------------------
+const BUILD = (() => {
+  const parts = ['public/app.js', 'public/styles.css', 'public/index.html', 'server.js'].map((f) => {
+    try { return fs.readFileSync(path.join(__dirname, f)); } catch { return Buffer.alloc(0); }
+  });
+  const hash = crypto.createHash('sha256').update(Buffer.concat(parts)).digest('hex').slice(0, 8);
+  let newest = 0;
+  for (const f of ['public/app.js', 'public/styles.css', 'server.js']) {
+    try { newest = Math.max(newest, fs.statSync(path.join(__dirname, f)).mtimeMs); } catch {}
+  }
+  return { id: hash, at: newest ? new Date(newest).toISOString() : new Date().toISOString() };
+})();
+
+const INDEX_HTML = (() => {
+  try {
+    return fs.readFileSync(path.join(__dirname, 'public/index.html'), 'utf8')
+      .replace('href="/styles.css"', `href="/styles.css?v=${BUILD.id}"`)
+      .replace('src="/app.js"', `src="/app.js?v=${BUILD.id}"`);
+  } catch { return ''; }
+})();
+
+const sendIndex = (req, res) => {
+  if (!INDEX_HTML) return res.status(500).send('Missing index.html');
+  res.set('Cache-Control', 'no-cache').type('html').send(INDEX_HTML);
+};
+app.get('/', sendIndex);
+app.get('/index.html', sendIndex);
+
+app.get('/api/version', (req, res) => res.json(BUILD));
+
+app.use(express.static(path.join(__dirname, 'public'), {
+  setHeaders: (res, filePath) => {
+    // Always ask the server whether app.js and styles.css have changed. They are
+    // small; a stale one costs her a bug that was already fixed.
+    if (/\.(js|css|html)$/.test(filePath)) res.set('Cache-Control', 'no-cache');
+  },
+}));
 
 const COOKIE = 'sage_session';
 const SESSION_DAYS = 30;
