@@ -1281,6 +1281,7 @@ VIEWS.settings = async function renderSettings() {
         <a class="btn ghost small" href="https://platform.openai.com/usage" target="_blank" rel="noopener">Usage ↗</a>
       </div>
     </div>
+    <div id="build-line" class="quiet" style="margin-top:18px;font-size:.8em;text-align:center"></div>
     <button class="btn ghost small" data-back style="margin-top:16px">← More</button>`;
   // Scoped to #main on purpose. The <html> element carries data-text and
   // data-theme (set at boot so the page never flashes the wrong theme), so an
@@ -1308,6 +1309,14 @@ VIEWS.settings = async function renderSettings() {
       await navigator.clipboard.writeText(`${location.origin}${path}`);
       toast('Copied. Paste it into any calendar app.');
     };
+  }).catch(() => {});
+  api('/api/version').then((v) => {
+    const line = $('#build-line');
+    if (!line) return;
+    const when = new Date(v.at);
+    const stamp = Number.isNaN(when.getTime()) ? '' : when.toLocaleString(undefined,
+      { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    line.textContent = `Sage ${v.id}${stamp ? ` · updated ${stamp}` : ''}`;
   }).catch(() => {});
   api('/api/preferences').then((prefs) => {
     const cb = $('#cal-feed-tasks');
