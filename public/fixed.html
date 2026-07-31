@@ -1,0 +1,303 @@
+<title>Sage — what's been fixed</title>
+
+<style>
+  :root {
+    --bg: #f4f6f2;
+    --paper: #ffffff;
+    --ink: #23291f;
+    --ink-soft: #6a7364;
+    --line: #dfe5d9;
+    --sage: #7d9a72;
+    --sage-deep: #57744c;
+    --sage-tint: #e9f0e6;
+    --clay: #a86a3d;
+    --clay-tint: #f7ebe1;
+    --shadow: 0 1px 3px rgba(35, 41, 31, .07), 0 4px 14px rgba(35, 41, 31, .05);
+    --display: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    --body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1b1f19; --paper: #262b23; --ink: #e8ece3; --ink-soft: #a3ab9b;
+      --line: #363d32; --sage: #8aa87e; --sage-deep: #a3c096; --sage-tint: #2b3527;
+      --clay: #d49b71; --clay-tint: #3a2e25;
+      --shadow: 0 1px 3px rgba(0, 0, 0, .3);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #1b1f19; --paper: #262b23; --ink: #e8ece3; --ink-soft: #a3ab9b;
+    --line: #363d32; --sage: #8aa87e; --sage-deep: #a3c096; --sage-tint: #2b3527;
+    --clay: #d49b71; --clay-tint: #3a2e25;
+    --shadow: 0 1px 3px rgba(0, 0, 0, .3);
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg: #f4f6f2; --paper: #ffffff; --ink: #23291f; --ink-soft: #6a7364;
+    --line: #dfe5d9; --sage: #7d9a72; --sage-deep: #57744c; --sage-tint: #e9f0e6;
+    --clay: #a86a3d; --clay-tint: #f7ebe1;
+    --shadow: 0 1px 3px rgba(35, 41, 31, .07), 0 4px 14px rgba(35, 41, 31, .05);
+  }
+
+  body {
+    background: var(--bg); color: var(--ink);
+    font-family: var(--body); font-size: 1.0625rem; line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 40rem; margin: 0 auto; padding: 2.5rem 1.25rem 5rem; }
+
+  header { margin-bottom: 2.5rem; }
+  .eyebrow {
+    font-size: .78rem; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--sage-deep); font-weight: 600; margin: 0 0 .8rem;
+  }
+  h1 {
+    font-family: var(--display); font-weight: 400; font-size: 2.5rem;
+    line-height: 1.08; margin: 0 0 .7rem; letter-spacing: -0.015em; text-wrap: balance;
+  }
+  header p { margin: 0; color: var(--ink-soft); font-size: 1.1875rem; max-width: 32rem; }
+
+  .tally {
+    display: flex; flex-wrap: wrap; gap: .6rem;
+    margin: 1.6rem 0 0;
+  }
+  .tally span {
+    background: var(--sage-tint); color: var(--sage-deep);
+    border-radius: 999px; padding: .3rem .85rem;
+    font-size: .88rem; font-weight: 600;
+  }
+
+  h2 {
+    font-family: var(--display); font-weight: 400; font-size: 1.7rem;
+    margin: 3rem 0 .3rem; letter-spacing: -0.01em; text-wrap: balance;
+  }
+  h2:first-of-type { margin-top: 2.5rem; }
+  .sub { color: var(--ink-soft); margin: 0 0 1.4rem; }
+
+  .fix {
+    background: var(--paper); border: 1px solid var(--line);
+    border-radius: 14px; padding: 1rem 1.15rem; box-shadow: var(--shadow);
+    margin-bottom: .85rem;
+  }
+  .fix .said {
+    font-family: var(--display); font-size: 1.1rem; line-height: 1.4;
+    margin: 0 0 .5rem; color: var(--ink);
+  }
+  .fix .said::before { content: '“'; }
+  .fix .said::after { content: '”'; }
+  .fix p { margin: 0; color: var(--ink-soft); font-size: .97rem; }
+  .fix p + p { margin-top: .5rem; }
+  .fix .now { color: var(--ink); }
+  .fix .now b { color: var(--sage-deep); font-weight: 650; }
+
+  .fix.mine { border-left: 4px solid var(--clay); }
+  .tagrow { margin-top: .6rem; display: flex; flex-wrap: wrap; gap: .4rem; }
+  .tag {
+    font-size: .74rem; letter-spacing: .04em; text-transform: uppercase;
+    font-weight: 650; border-radius: 999px; padding: .18rem .6rem;
+    background: var(--sage-tint); color: var(--sage-deep);
+  }
+  .tag.bug { background: var(--clay-tint); color: var(--clay); }
+
+  .note {
+    background: var(--sage-tint); border-radius: 14px;
+    padding: 1.1rem 1.2rem; margin: 2rem 0 0;
+  }
+  .note b { display: block; margin-bottom: .35rem; font-weight: 650; }
+  .note p { margin: 0 0 .6rem; }
+  .note p:last-child { margin-bottom: 0; }
+
+  ul.open { margin: 0; padding-left: 1.1rem; }
+  ul.open li { margin-bottom: .5rem; }
+
+  footer {
+    margin-top: 3rem; padding-top: 1.4rem; border-top: 1px solid var(--line);
+    color: var(--ink-soft); font-size: .95rem;
+  }
+
+  @media (max-width: 30rem) { h1 { font-size: 2rem; } h2 { font-size: 1.45rem; } }
+  @media print {
+    body { background: #fff; color: #000; font-size: 10.5pt; }
+    .fix { break-inside: avoid; box-shadow: none; }
+    .tally span, .tag { border: 1px solid #999; background: none; color: #000; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header>
+    <p class="eyebrow">Sage · 30 July 2026</p>
+    <h1>Everything that's been fixed</h1>
+    <p>So nobody has to wonder whether they already asked. Each one is the thing Regena actually said, and what happened because she said it.</p>
+    <div class="tally">
+      <span>13 reports</span>
+      <span>7 real bugs</span>
+      <span>5 new things</span>
+      <span>all live</span>
+    </div>
+  </header>
+
+  <h2>The calendar</h2>
+  <p class="sub">Getting her real appointments into Sage.</p>
+
+  <div class="fix mine">
+    <p class="said">I connected the apple calendars but nothing is coming through.</p>
+    <p>Two faults in the same place. Sage was reading Apple's reply in the wrong dialect, so it skipped every calendar — and underneath that, it was mangling every appointment's date, so they'd have been thrown away anyway.</p>
+    <p class="now"><b>Now:</b> her iCloud calendar comes through, and a PT appointment still switches off her home PT rounds for that day.</p>
+    <div class="tagrow"><span class="tag bug">bug</span><span class="tag">found by Regena</span></div>
+  </div>
+
+  <div class="fix mine">
+    <p class="said">There was a button that popped up briefly that said refresh, but I can't find it now.</p>
+    <p>Not imagined. It was real, and it was sitting at the very bottom of a long screen where nobody would look.</p>
+    <p class="now"><b>Now:</b> <b>🔄 Check for changes now</b> is the first thing in that section.</p>
+    <div class="tagrow"><span class="tag bug">bug</span><span class="tag">found by Regena</span></div>
+  </div>
+
+  <div class="fix">
+    <p class="said">It shows to-do items which I don't want. For my calendar I just want appointments.</p>
+    <p>She was right on the principle, not just the preference — a calendar full of chores stops being a calendar.</p>
+    <p class="now"><b>Now:</b> appointments only. There's a switch in Settings if she ever wants the to-dos there.</p>
+    <div class="tagrow"><span class="tag">changed</span></div>
+  </div>
+
+  <div class="fix">
+    <p class="said">null ⚠️</p>
+    <p>That name came from Apple, not from Sage. iCloud marks a list that way when it won't share it properly with other apps.</p>
+    <p class="now"><b>Now:</b> Settings explains whose mark it is, and there's a <b>What did Apple send?</b> button that shows exactly what her account handed over.</p>
+    <div class="tagrow"><span class="tag">explained</span><span class="tag">found by Regena</span></div>
+  </div>
+
+  <div class="fix mine">
+    <p class="said">(found while chasing the one above)</p>
+    <p>Every calendar and reminder list was being read inside one attempt, so a single stale list could have taken her whole day's appointments down with it.</p>
+    <p class="now"><b>Now:</b> each one stands on its own and says why if it fails.</p>
+    <div class="tagrow"><span class="tag bug">bug</span></div>
+  </div>
+
+  <div class="fix">
+    <p class="said">I don't see reminders at all.</p>
+    <p>iCloud will not share Reminders lists with any app outside Apple's own. Eleven lists on her phone, and iCloud offers none of them. That's Apple's boundary, not something Sage can work around.</p>
+    <p class="now"><b>Now:</b> her Reminders app keeps doing its own job, and Sage has <b>My lists</b> instead.</p>
+    <div class="tagrow"><span class="tag">answered</span></div>
+  </div>
+
+  <h2>Her subscriptions</h2>
+  <p class="sub">The one Reminders list she actually needed.</p>
+
+  <div class="fix">
+    <p class="said">The only reminder she really needs is subscriptions — can we seed those in?</p>
+    <p>All ten typed across from her list: AARP, Norton, Frndly, the fishing licence, the roach spray, Dermalogica, Rollo's birthday, Paramount+, HBO Max, Terminix. Account numbers deliberately left in her Reminders app.</p>
+    <p class="now"><b>Now:</b> <b>Projects → Subscriptions &amp; renewals</b>, and each one turns up in <b>Coming up</b> when it's near.</p>
+    <div class="tagrow"><span class="tag">new</span></div>
+  </div>
+
+  <div class="fix">
+    <p class="said">She does want yearly.</p>
+    <p>Sage had no way to repeat anything — ticking something finished it for good.</p>
+    <p class="now"><b>Now:</b> ticking a renewal moves it to its next date instead of closing it. Weekly, monthly, every 3 months or yearly, set per item under <b>Comes back round</b>.</p>
+    <div class="tagrow"><span class="tag">new</span></div>
+  </div>
+
+  <div class="fix">
+    <p class="said">Her fishing licence expired on 4 July.</p>
+    <p>Not a bug — a thing the app found for her while moving the list across.</p>
+    <p class="now"><b>Worth doing</b> before the next trip to the lake.</p>
+    <div class="tagrow"><span class="tag">still open</span></div>
+  </div>
+
+  <h2>Using it day to day</h2>
+
+  <div class="fix mine">
+    <p class="said">It just won't recognize my taps. If I close the app and go back in, it probably will work.</p>
+    <p>The worst one. Every time she moved between screens the app added another copy of the tap handler, so one tap fired twice and cancelled itself out — working or not working depending on whether the count was odd or even.</p>
+    <p>It was also quietly damaging her renewals: one tap on AARP moved it <b>six years</b> into the future.</p>
+    <p class="now"><b>Now:</b> one tap, one action, every time.</p>
+    <div class="tagrow"><span class="tag bug">bug</span><span class="tag">found by Regena</span></div>
+  </div>
+
+  <div class="fix mine">
+    <p class="said">It keeps asking me to confirm, but I don't know where to put the confirmation.</p>
+    <p>Sage asked a question and put the answer on screen as an unticked box — so of course she tried to type "yes". Worse, tapping save with nothing ticked would have thrown away everything she'd written.</p>
+    <p class="now"><b>Now:</b> the question says "you answer by ticking below", the button says what it will do, and nothing gets binned.</p>
+    <div class="tagrow"><span class="tag bug">bug</span><span class="tag">found by Regena</span></div>
+  </div>
+
+  <div class="fix">
+    <p class="said">I thought that this would go in the garden projects. Not sure how the categorization is working.</p>
+    <p>It was happening invisibly, with no way to correct it before saving.</p>
+    <p class="now"><b>Now:</b> every proposed item shows <b>where it will be filed</b>, and she can change it before tapping save.</p>
+    <div class="tagrow"><span class="tag">changed</span><span class="tag">found by Regena</span></div>
+  </div>
+
+  <div class="fix">
+    <p class="said">Is she able to create reminder lists in her app?</p>
+    <p>She wasn't. Now she is.</p>
+    <p class="now"><b>Now:</b> <b>More → 🗒️ My lists</b>. Costco, packing, anything that piles up. Nothing on a list will ever chase her.</p>
+    <div class="tagrow"><span class="tag">new</span></div>
+  </div>
+
+  <h2>Routines</h2>
+
+  <div class="fix mine">
+    <p class="said">I'm not sure how to edit a routine. I wanted to add a lake seasonal open and seasonal close.</p>
+    <p>She couldn't. The ability to make and change routines had been in the app since day one with no way to reach it.</p>
+    <p class="now"><b>Now:</b> <b>More → 📋 Routines → ＋ New routine</b>, or <b>Change this routine</b> on any of them. For the lake, choose <b>Certain months of the year</b> and tap April to open, October to close.</p>
+    <div class="tagrow"><span class="tag">new</span><span class="tag">found by Regena</span></div>
+  </div>
+
+  <div class="fix">
+    <p class="said">I can't actually see the routine unless the event opens.</p>
+    <p class="now"><b>Now:</b> the Routines screen lists every routine with all its steps, whether or not today is its day — and today's can be ticked off right there.</p>
+    <div class="tagrow"><span class="tag">changed</span><span class="tag">found by Regena</span></div>
+  </div>
+
+  <div class="fix">
+    <p class="said">I can't do weigh-ins at the lake.</p>
+    <p>Read as the fact it is: the scale is at home.</p>
+    <p class="now"><b>Now:</b> Sage doesn't ask while she's away, and says so rather than going blank. She can still record one by hand anywhere.</p>
+    <div class="tagrow"><span class="tag">changed</span></div>
+  </div>
+
+  <div class="fix">
+    <p class="said">Evening closing doesn't open at 4:30 pm.</p>
+    <p>Two separate things. The tapping fault above was stopping it opening. Separately, Evening closing is set to come round <b>after 7pm</b> — which is why it isn't waiting on the Now screen at half four.</p>
+    <p class="now">If she'd rather it started earlier, that's now hers to change: <b>Change this routine</b> → Time of day.</p>
+    <div class="tagrow"><span class="tag">answered</span></div>
+  </div>
+
+  <h2>Small things</h2>
+
+  <div class="fix">
+    <p class="said">She'd love evening fireflies. And can she have the time on her Now screen?</p>
+    <p class="now"><b>Done</b> — both, plus staying signed in so she never has to log back into her own morning.</p>
+    <div class="tagrow"><span class="tag">new</span></div>
+  </div>
+
+  <div class="fix">
+    <p class="said">Can she ask Sage in ChatGPT to look at what she has happening?</p>
+    <p class="now"><b>Done</b> — and read-only by construction. ChatGPT can look; it can never change anything here.</p>
+    <div class="tagrow"><span class="tag">new</span></div>
+  </div>
+
+  <div class="fix">
+    <p class="said">Will you make me a user manual?</p>
+    <p class="now"><b>Done</b> — and it lives inside the app too: <b>More → 📖 How Sage works</b>.</p>
+    <div class="tagrow"><span class="tag">new</span></div>
+  </div>
+
+  <h2>Still open</h2>
+  <div class="note">
+    <b>Three things, none urgent</b>
+    <ul class="open">
+      <li><b>The fishing licence</b> — expired 4 July, worth sorting before the next lake trip.</li>
+      <li><b>The app-specific password</b> — it travelled by text message, so it's worth retiring at appleid.apple.com and making a fresh one.</li>
+      <li><b>Those two ⚠️ lists</b> — she can untick them in Settings; they'll only ever say "nothing came through".</li>
+    </ul>
+  </div>
+
+  <footer>
+    <p>Every single fault above was found by Regena using the app and saying "that looks wrong". Seven of them were real bugs, two could have quietly damaged her data, and none would have been found any other way.</p>
+  </footer>
+
+</div>
