@@ -299,8 +299,22 @@ function itemRow(i, { flat = false } = {}) {
     </div>`;
 }
 
+// #main is never thrown away — only its innerHTML is replaced — so attaching a
+// delegated listener on every render stacks another copy on the same element.
+// Two copies make one tap fire twice: a toggle opens and shuts again (looking
+// like the tap was ignored), and a tick saves twice. Attach once per element,
+// tracked outside the DOM so no stray attribute can be caught by a selector.
+const WIRED = new WeakMap();
+function wireOnce(root, key, attach) {
+  const done = WIRED.get(root) || new Set();
+  if (done.has(key)) return;
+  done.add(key);
+  WIRED.set(root, done);
+  attach();
+}
+
 function wireItems(root) {
-  root.addEventListener('click', async (e) => {
+  wireOnce(root, 'items', () => root.addEventListener('click', async (e) => {
     const tick = e.target.closest('[data-tick]')?.dataset.tick;
     const open = e.target.closest('[data-open]')?.dataset.open;
     if (tick) {
@@ -314,7 +328,7 @@ function wireItems(root) {
       const it = list.find((x) => x.id == open);
       if (it) openItem(it);
     }
-  });
+  }));
 }
 
 // On NOW the routine starts collapsed to one line, so the screen stays scannable
@@ -336,7 +350,7 @@ function routineBlock(r, { collapsed = false } = {}) {
 }
 
 function wireRoutines(root) {
-  root.addEventListener('click', async (e) => {
+  wireOnce(root, 'routines', () => root.addEventListener('click', async (e) => {
     const toggle = e.target.closest('[data-toggle]');
     if (toggle) {
       const block = toggle.closest('.routine-block');
@@ -361,7 +375,7 @@ function wireRoutines(root) {
       const c = $('.count', block);
       if (c) c.textContent = left ? `${left} left` : 'done ✓';
     }
-  });
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -502,12 +516,12 @@ VIEWS.now = async function renderNow() {
 
   wireItems($('#main'));
   wireRoutines($('#main'));
-  $('#main').addEventListener('click', async (e) => {
+  wireOnce($('#main'), 'now-undo', () => $('#main').addEventListener('click', async (e) => {
     const u = e.target.closest('[data-undo]')?.dataset.undo;
     const goto = e.target.closest('[data-goto]')?.dataset.goto;
     if (u) { await api(`/api/history/${u}/undo`, { method: 'POST' }); toast('Undone.'); setView('now'); }
     if (goto) setView(goto);
-  });
+  }));
   if ($('#wt-save')) $('#wt-save').onclick = async () => {
     const v = $('#wt').value.trim();
     if (!v) return;
@@ -1569,6 +1583,9 @@ function proposalCard(p, idx) {
             <div class="btn-row" style="margin-top:6px">
               <input type="date" data-f="due_at" value="${esc((i.due_at || '').slice(0, 10))}" style="flex:1">
             </div>
+            <select data-f="project_id" data-wants="${i.project_id || 0}" style="margin-top:6px">
+              <option value="0">Not filed anywhere</option>
+            </select>
             ${i.target_window ? `<div class="quiet" style="margin-top:5px">not until ${esc(i.target_window)}</div>` : ''}
             ${i.event_kind ? `<div class="quiet" style="margin-top:5px">${esc(i.event_kind)}</div>` : ''}
             ${unsure}
@@ -1646,6 +1663,25 @@ function renderProposals(m, r) {
   };
   boxes.forEach((b) => b.addEventListener('change', refresh));
   refresh();
+
+  // Where something is being filed is part of the proposal, not a detail she
+  // has to go hunting for afterwards. "I thought this would go in the garden
+  // projects" is a fair thing to be able to fix before tapping save.
+  const pickers = $$('[data-f="project_id"]', m);
+  if (pickers.length) {
+    api('/api/items?status=open').then((all) => {
+      const projects = all.filter((x) => x.type === 'project');
+      const lists = all.filter((x) => x.type === 'list');
+      const group = (label, rows) => (rows.length
+        ? `<optgroup label="${label}">${rows.map((x) => `<option value="${x.id}">${esc(x.title)}</option>`).join('')}</optgroup>`
+        : '');
+      for (const sel of pickers) {
+        sel.innerHTML = `<option value="0">Not filed anywhere</option>${group('Projects', projects)}${group('Lists', lists)}`;
+        sel.value = String(sel.dataset.wants || 0);
+        if (sel.value !== String(sel.dataset.wants || 0)) sel.value = '0';
+      }
+    }).catch(() => {});
+  }
 
   $('#cap-save', m).onclick = async () => {
     const chosen = [];
