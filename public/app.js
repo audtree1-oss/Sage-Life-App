@@ -1282,6 +1282,8 @@ VIEWS.settings = async function renderSettings() {
       </div>
     </div>
     <div id="build-line" class="quiet" style="margin-top:18px;font-size:.8em;text-align:center"></div>
+    <p class="quiet" style="text-align:center;font-size:.8em;margin-top:4px">
+      <a href="/fixed.html" target="_blank" rel="noopener">What's been fixed so far</a></p>
     <button class="btn ghost small" data-back style="margin-top:16px">← More</button>`;
   // Scoped to #main on purpose. The <html> element carries data-text and
   // data-theme (set at boot so the page never flashes the wrong theme), so an
