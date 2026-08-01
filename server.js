@@ -1732,6 +1732,17 @@ app.post('/api/tracking', (req, res) => {
   res.json({ ok: true });
 });
 
+// A line from her daughter, kept as ordinary preference text so it can be
+// changed, replaced, or removed by either of them. Sage does not write it and
+// never edits it — it only carries it.
+const LOVE_DEFAULT = { text: 'I love you, Mom.', from: 'Audrey' };
+function loveNote(uid) {
+  const get = (k) => db.prepare('SELECT value FROM preferences WHERE user_id = ? AND key = ?').get(uid, k)?.value;
+  const text = get('love_note');
+  if (text === '') return null;                       // deliberately cleared
+  return { text: text || LOVE_DEFAULT.text, from: get('love_note_from') ?? LOVE_DEFAULT.from };
+}
+
 app.get('/api/preferences', (req, res) => {
   const rows = db.prepare('SELECT key, value FROM preferences WHERE user_id = ?').all(req.user.id);
   res.json(Object.fromEntries(rows.map((r) => [r.key, r.value])));
@@ -1872,6 +1883,7 @@ app.get('/api/views/now', async (req, res) => {
     immediate, reminders, routines: timely,
     weightToday, weighInHere, awayAt: weighInHere ? '' : (ctx.here?.name || 'away'),
     morning: morningOpening(uid, ctx, { hour, nextEvent, overdue: p.overdue }),
+    love: loveNote(uid),
     counts: { open: p.all.length, overdue: p.overdue.length, blocked: p.blocked.length },
   });
 });

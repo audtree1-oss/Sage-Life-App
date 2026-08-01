@@ -244,6 +244,20 @@ a.more-tile { display: block; text-decoration: none; }
 .morning-note {
   color: var(--ink-soft); font-size: 1.02em; margin: 6px 0; line-height: 1.6;
 }
+.love {
+  margin: 4px auto 20px; max-width: 18em;
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  font-size: 1.35em; line-height: 1.35; color: var(--sage-deep);
+}
+.love::before { content: '💛 '; font-size: .8em; }
+.love-from {
+  display: block; margin-top: 6px;
+  font-family: inherit; font-size: .62em; letter-spacing: .04em;
+  color: var(--ink-soft);
+}
+.love.small { font-size: 1.05em; margin: 2px 0 14px; text-align: center; max-width: none; }
+.love.small .love-from { display: inline; margin-left: 6px; font-size: .8em; }
+
 .morning-line {
   margin: 26px auto 0; max-width: 21em; line-height: 1.65; font-size: 1.05em;
 }
