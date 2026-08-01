@@ -454,6 +454,7 @@ VIEWS.now = async function renderNow() {
         <div class="clock"><span id="clock-time">${esc(clockTime())}</span></div>
         <div class="clock-date" id="clock-date">${esc(clockDate())}</div>
         <h1>${d.greeting}, ${esc(ME.name.split(' ')[0])}.</h1>
+        ${d.love ? `<p class="love">${esc(d.love.text)}${d.love.from ? `<span class="love-from">— ${esc(d.love.from)}</span>` : ''}</p>` : ''}
         ${d.morning.notes.map((n) => `<p class="morning-note">${esc(n)}</p>`).join('')}
         ${d.morning.soon ? `
           <div class="card sky" style="margin-top:20px;text-align:left">
@@ -499,6 +500,7 @@ VIEWS.now = async function renderNow() {
       <h1>${d.greeting}, ${esc(ME.name.split(' ')[0])}.</h1>
       ${wx ? `<span class="wx">${esc(d.here?.name || '')} ${wx}</span>` : ''}
     </div>
+    ${d.love ? `<p class="love small">${esc(d.love.text)}${d.love.from ? `<span class="love-from">— ${esc(d.love.from)}</span>` : ''}</p>` : ''}
     <p class="sub">${d.immediate.length || d.routines.length ? 'Right now:' : 'Nothing is asking for you this minute.'}</p>
     ${undoable ? `<div class="strip">🌿 Sage ${esc(undoable.action)} “${esc(undoable.detail)}”<button class="btn small ghost" data-undo="${undoable.id}">Undo</button></div>` : ''}
     ${bits.join('')}
@@ -773,34 +775,61 @@ VIEWS.lake = async function renderLake() {
   };
 };
 
+// Her ask: "I would love to have the routine list collapsible so that I can see
+// the whole list at the title level and then open each one individually or all
+// as I need to." Which ones are open is remembered while she is in the app, so
+// ticking a step doesn't shut everything again.
+const OPEN_ROUTINES = new Set();
+
 VIEWS.routines = async function renderRoutines() {
   const all = await api('/api/routines?all=1');
   const active = await api('/api/routines');
   const activeIds = new Set(active.map((r) => r.id));
   const byId = new Map(active.map((r) => [r.id, r]));
+  const allOpen = all.length > 0 && all.every((r) => OPEN_ROUTINES.has(r.id));
   $('#main').innerHTML = `
     <h1>📋 Routines</h1>
-    <p class="sub">All of them, whether or not today is their day. Tap one to change it.</p>
-    <button class="btn small" id="rt-new">＋ New routine</button>
+    <p class="sub">All of them, whether or not today is their day. Tap a name to open it.</p>
+    <div class="btn-row">
+      <button class="btn small" id="rt-new" style="flex:1">＋ New routine</button>
+      <button class="btn ghost small" id="rt-all" style="flex:1">${allOpen ? 'Close all' : 'Open all'}</button>
+    </div>
     <div style="margin-top:12px">
-    ${all.map((r) => `
-      <div class="card">
-        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
-          <b>${r.emoji || '📋'} ${esc(r.name)}</b>
-          ${activeIds.has(r.id)
-            ? `<span class="pill">${byId.get(r.id).complete ? 'done today ✓' : `${byId.get(r.id).remaining} left today`}</span>`
-            : '<span class="pill grey">not today</span>'}
+    ${all.map((r) => {
+      const open = OPEN_ROUTINES.has(r.id);
+      const live = byId.get(r.id);
+      return `
+      <div class="card" style="padding-top:12px;padding-bottom:${open ? '16' : '12'}px">
+        <div data-rt-head="${r.id}" style="display:flex;justify-content:space-between;align-items:center;gap:8px;cursor:pointer">
+          <b style="flex:1">${r.emoji || '📋'} ${esc(r.name)}</b>
+          ${live
+            ? `<span class="pill">${live.complete ? 'done ✓' : `${live.remaining} left`}</span>`
+            : `<span class="pill grey">${r.steps.length} step${r.steps.length === 1 ? '' : 's'}</span>`}
+          <span aria-hidden="true" style="color:var(--ink-soft)">${open ? '⌄' : '›'}</span>
         </div>
-        <div class="quiet" style="margin-top:2px">${esc(describeTrigger(r))}</div>
-        ${activeIds.has(r.id)
-          ? routineBlock(byId.get(r.id), { bare: true })
-          : `<ol class="quiet" style="margin:8px 0 0 -14px;line-height:1.6">${r.steps.map((st) => `<li>${esc(st.text)}</li>`).join('') || '<li>No steps yet.</li>'}</ol>`}
-        <button class="btn ghost small" data-rt-edit="${r.id}" style="margin-top:10px">Change this routine</button>
-      </div>`).join('') || '<div class="empty">No routines yet.</div>'}
+        ${open ? `
+          <div class="quiet" style="margin-top:6px">${esc(describeTrigger(r))}</div>
+          ${live
+            ? routineBlock(live, { bare: true })
+            : `<ol class="quiet" style="margin:8px 0 0 -14px;line-height:1.6">${r.steps.map((st) => `<li>${esc(st.text)}</li>`).join('') || '<li>No steps yet.</li>'}</ol>`}
+          <button class="btn ghost small" data-rt-edit="${r.id}" style="margin-top:10px">Change this routine</button>`
+        : ''}
+      </div>`;
+    }).join('') || '<div class="empty">No routines yet.</div>'}
     </div>
     <button class="btn ghost small" data-back style="margin-top:16px">← More</button>`;
   wireRoutines($('#main'));
   $('#rt-new').onclick = () => openRoutine(null);
+  $('#rt-all').onclick = () => {
+    if (allOpen) OPEN_ROUTINES.clear();
+    else all.forEach((r) => OPEN_ROUTINES.add(r.id));
+    setView('routines');
+  };
+  $$('[data-rt-head]').forEach((h) => h.onclick = () => {
+    const id = +h.dataset.rtHead;
+    if (OPEN_ROUTINES.has(id)) OPEN_ROUTINES.delete(id); else OPEN_ROUTINES.add(id);
+    setView('routines');
+  });
   $$('[data-rt-edit]').forEach((b) => b.onclick = () => {
     openRoutine(all.find((r) => r.id === +b.dataset.rtEdit));
   });
@@ -1231,6 +1260,16 @@ VIEWS.settings = async function renderSettings() {
     <h2>Appearance</h2>
     <div class="seg">${[['light', 'Light'], ['dark', 'Dark']].map(([v, l]) =>
       `<button class="${theme === v ? 'on' : ''}" data-theme="${v}">${l}</button>`).join('')}</div>
+    <h2>💛 The note on her morning screen</h2>
+    <div class="card">
+      <p class="quiet" style="margin:0 0 10px;font-size:.9em">This shows first thing every morning, and quietly on Now.
+      Change it to whatever you like. Leave it empty and it won't appear at all.</p>
+      <label class="field">What it says</label>
+      <input type="text" id="love-text" maxlength="120" placeholder="I love you, Mom.">
+      <label class="field">Who it's from</label>
+      <input type="text" id="love-from" maxlength="40" placeholder="Audrey">
+      <button class="btn small" id="love-save" style="margin-top:12px">Save</button>
+    </div>
     <h2>📅 Sage → your calendar</h2>
     <div class="card">
       <p style="margin:0 0 10px;font-size:.88em">Put Sage's dates on your real calendar, with real alerts on your phone and watch. Subscribe once; new dates flow in on their own.</p>
@@ -1312,6 +1351,18 @@ VIEWS.settings = async function renderSettings() {
       toast('Copied. Paste it into any calendar app.');
     };
   }).catch(() => {});
+  api('/api/views/now').then((d) => {
+    if (!$('#love-text')) return;
+    $('#love-text').value = d.love ? d.love.text : '';
+    $('#love-from').value = d.love ? d.love.from : '';
+  }).catch(() => {});
+  if ($('#love-save')) $('#love-save').onclick = async () => {
+    await api('/api/preferences', { method: 'POST', body: {
+      love_note: $('#love-text').value.trim(),
+      love_note_from: $('#love-from').value.trim(),
+    } });
+    toast($('#love-text').value.trim() ? 'Saved. It will be there in the morning.' : 'Removed.');
+  };
   api('/api/version').then((v) => {
     const line = $('#build-line');
     if (!line) return;
