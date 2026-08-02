@@ -322,10 +322,23 @@
     .note { break-inside: avoid; box-shadow: none; }
     .tap { border: 1px solid #000; background: none; color: #000; }
   }
+
+  .backbar {
+    position: sticky; top: 0; z-index: 5;
+    margin: 0 -1.25rem 1.25rem; padding: .7rem 1.25rem;
+    background: var(--paper); border-bottom: 1px solid var(--line);
+    display: flex; align-items: center;
+  }
+  .backbar a {
+    color: var(--sage-deep); text-decoration: none; font-weight: 650;
+    font-family: var(--body, -apple-system, sans-serif); font-size: 1rem;
+  }
+  @media print { .backbar { display: none; } }
 </style>
 
 <div class="wrap">
 
+  <div class="backbar"><a href="/">← Back to Sage</a></div>
   <header class="masthead">
     <span class="firefly"></span><span class="firefly"></span>
     <span class="firefly"></span><span class="firefly"></span>
@@ -415,7 +428,7 @@
       <li><span class="icon" aria-hidden="true">🏞️</span><p class="what"><b>The lake</b><span>The next trip, the weather there now, and what still needs packing.</span></p></li>
       <li><span class="icon" aria-hidden="true">📋</span><p class="what"><b>Routines</b><span>Your morning and evening rounds, and when each one applies.</span></p></li>
       <li><span class="icon" aria-hidden="true">🗒️</span><p class="what"><b>My lists</b><span>Costco, packing, anything that piles up. See below.</span></p></li>
-      <li><span class="icon" aria-hidden="true">🛒</span><p class="what"><b>Shopping</b><span>What to buy, and what to wait for a sale on.</span></p></li>
+      <li><span class="icon" aria-hidden="true">🛒</span><p class="what"><b>Shopping</b><span>What to buy, and what to wait for a sale on. <b>＋ Add something to buy</b> for the list; tap any supply to say whether it's stocked, getting low, or out.</span></p></li>
       <li><span class="icon" aria-hidden="true">📝</span><p class="what"><b>Notes</b><span>Things worth keeping that aren't tasks pretending to need a checkbox.</span></p></li>
       <li><span class="icon" aria-hidden="true">📁</span><p class="what"><b>Files</b><span>Photos and documents you've handed to Sage.</span></p></li>
       <li><span class="icon" aria-hidden="true">📥</span><p class="what"><b>Recent captures</b><span>The last things you told Sage, in case one went astray.</span></p></li>
@@ -516,7 +529,7 @@
       <li><span class="icon" aria-hidden="true">🔠</span><p class="what"><b>Text size</b><span>Normal, Large, Largest. Large is where it starts.</span></p></li>
       <li><span class="icon" aria-hidden="true">🌙</span><p class="what"><b>Appearance</b><span>Light or dark.</span></p></li>
       <li><span class="icon" aria-hidden="true">🗣️</span><p class="what"><b>How Sage talks to you</b><span>Say it in your own words — blunter, warmer, shorter, stop doing that thing. Your wording wins.</span></p></li>
-      <li><span class="icon" aria-hidden="true">🤖</span><p class="what"><b>ChatGPT</b><span>Lets your Sage in ChatGPT look at what's going on here. It can only ever read, never change anything.</span></p></li>
+      <li><span class="icon" aria-hidden="true">🤖</span><p class="what"><b>ChatGPT</b><span>Lets a <b>Custom GPT</b> in ChatGPT look at what's going on here — read only, it can never change anything. A Custom GPT is a saved ChatGPT you add tools to; an ordinary conversation with Sage in ChatGPT isn't one. Making it takes a few minutes on a computer and needs a paid ChatGPT plan; the steps are in Settings.</span></p></li>
       <li><span class="icon" aria-hidden="true">⬇️</span><p class="what"><b>Export everything</b><span>Your whole life in Sage, as one file. It's yours.</span></p></li>
     </ul>
     <p>You'll stay signed in — you shouldn't have to log in to your own morning.</p>
@@ -550,6 +563,7 @@
   <footer>
     <p><a href="/fixed.html">What's been fixed so far →</a> — everything you've reported and what changed because of it, so you never have to wonder whether you already asked.</p>
     <p>Sage was built for Regena, to her own specification. It complements the things that already work rather than replacing them — your calendar stays your calendar, your Reminders stay your Reminders, and Sage holds the rest so it stops living in your head.</p>
+    <p style="margin-top:1.2rem"><a href="/">← Back to Sage</a></p>
   </footer>
 
 </div>
