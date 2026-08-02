@@ -121,10 +121,23 @@
     .fix { break-inside: avoid; box-shadow: none; }
     .tally span, .tag { border: 1px solid #999; background: none; color: #000; }
   }
+
+  .backbar {
+    position: sticky; top: 0; z-index: 5;
+    margin: 0 -1.25rem 1.25rem; padding: .7rem 1.25rem;
+    background: var(--paper); border-bottom: 1px solid var(--line);
+    display: flex; align-items: center;
+  }
+  .backbar a {
+    color: var(--sage-deep); text-decoration: none; font-weight: 650;
+    font-family: var(--body, -apple-system, sans-serif); font-size: 1rem;
+  }
+  @media print { .backbar { display: none; } }
 </style>
 
 <div class="wrap">
 
+  <div class="backbar"><a href="/">← Back to Sage</a></div>
   <header>
     <p class="eyebrow">Sage · 30 July 2026</p>
     <h1>Everything that's been fixed</h1>
@@ -298,6 +311,7 @@
 
   <footer>
     <p>Every single fault above was found by Regena using the app and saying "that looks wrong". Seven of them were real bugs, two could have quietly damaged her data, and none would have been found any other way.</p>
+    <p style="margin-top:1.2rem"><a href="/">← Back to Sage</a></p>
   </footer>
 
 </div>

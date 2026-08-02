@@ -994,21 +994,109 @@ function describeTrigger(r) {
   return when.join(', ');
 }
 
+const SUPPLY_STATE = { ok: 'Stocked', low: 'Getting low', out: 'Out' };
+const BUY_RULE = { now: 'Buy it now', low: 'When it runs low', on_sale: 'Wait for a sale', watch: 'Just keeping an eye on it' };
+
 VIEWS.shopping = async function renderShopping() {
   const items = await api('/api/items?type=shopping&status=open');
   const inv = await api('/api/inventory');
   $('#main').innerHTML = `
     <h1>🛒 Shopping</h1>
     <p class="sub">What to get, and what to watch rather than rush.</p>
-    ${items.length ? items.map((i) => itemRow(i)).join('') : '<div class="empty">Nothing on the list.</div>'}
-    ${inv.length ? `<h2>Supplies</h2>${inv.map((v) => `
-      <div class="row"><div class="body"><div class="title">${esc(v.name)}</div>
-        <div class="meta">${v.state === 'out' ? '❗ out' : v.state === 'low' ? '⚠️ getting low' : 'stocked'}${v.store ? ' · ' + esc(v.store) : ''}${v.purchase_rule === 'on_sale' ? ' · wait for a sale' : ''}</div>
-      </div></div>`).join('')}` : ''}
-    <button class="btn ghost small" data-back style="margin-top:16px">← More</button>`;
+    <button class="btn small" id="shop-add">＋ Add something to buy</button>
+    <div style="margin-top:12px">
+      ${items.length ? items.map((i) => itemRow(i)).join('') : '<div class="empty">Nothing on the list.</div>'}
+    </div>
+    <h2>Supplies</h2>
+    <p class="sub" style="margin-top:-8px">Things you keep in the house. Tap one to say how it's doing.</p>
+    ${inv.map((v) => `
+      <div class="row" data-supply="${v.id}" style="cursor:pointer">
+        <div class="body"><div class="title">${esc(v.name)}</div>
+        <div class="meta">${v.state === 'out' ? '❗ out' : v.state === 'low' ? '⚠️ getting low' : 'stocked'}${v.store ? ' · ' + esc(v.store) : ''}${v.purchase_rule === 'on_sale' ? ' · wait for a sale' : ''}</div></div>
+        <span aria-hidden="true" style="color:var(--ink-soft);align-self:center">›</span>
+      </div>`).join('') || '<div class="quiet">Nothing listed yet.</div>'}
+    <button class="btn ghost small" id="supply-add" style="margin-top:12px">＋ Add a supply</button>
+    <div class="btn-row" style="margin-top:16px"><button class="btn ghost small" data-back>← More</button></div>`;
   wireItems($('#main'));
+  $('#shop-add').onclick = () => {
+    const m = openModal(`
+      <h2>🛒 Add to the shopping list</h2>
+      <label class="field">What do you need?</label>
+      <input type="text" id="sh-title" placeholder="e.g. Birthday card for Pam">
+      <label class="field">Where from (optional)</label>
+      <input type="text" id="sh-store" placeholder="e.g. Costco">
+      <label class="field">When</label>
+      <select id="sh-rule">${Object.entries(BUY_RULE).map(([v, l]) =>
+        `<option value="${v}" ${v === 'now' ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <button class="btn big" id="sh-save" style="margin-top:16px">Add it</button>`);
+    $('#sh-title', m).focus();
+    const save = async () => {
+      const title = $('#sh-title', m).value.trim();
+      if (!title) return toast('What is it?');
+      await api('/api/items', { method: 'POST', body: {
+        title, type: 'shopping', store: $('#sh-store', m).value.trim(),
+        purchase_rule: $('#sh-rule', m).value, source: 'typed',
+      } });
+      closeModal(); toast('On the list.'); setView('shopping');
+    };
+    $('#sh-save', m).onclick = save;
+    $('#sh-title', m).onkeydown = (e) => { if (e.key === 'Enter') save(); };
+  };
+  $('#supply-add').onclick = () => openSupply(null);
+  $$('[data-supply]').forEach((row) => row.onclick = () => {
+    openSupply(inv.find((v) => v.id === +row.dataset.supply));
+  });
   $('[data-back]').onclick = () => setView('more');
 };
+
+// A supply is a thing she keeps in the house, not a task. The useful edit is
+// almost always "how is it doing" — so that is the first thing on the sheet.
+async function openSupply(v) {
+  const isNew = !v;
+  const locations = await api('/api/locations').catch(() => []);
+  const m = openModal(`
+    <h2>${isNew ? '＋ Add a supply' : esc(v.name)}</h2>
+    <label class="field">Name</label>
+    <input type="text" id="sp-name" value="${esc((v && v.name) || '')}" placeholder="e.g. Dawn dish detergent">
+    <label class="field">How is it doing?</label>
+    <div class="seg" id="sp-state">${Object.entries(SUPPLY_STATE).map(([k, l]) =>
+      `<button type="button" data-state="${k}" class="${k === ((v && v.state) || 'ok') ? 'on' : ''}">${l}</button>`).join('')}</div>
+    <label class="field">When to buy more</label>
+    <select id="sp-rule">${Object.entries(BUY_RULE).map(([k, l]) =>
+      `<option value="${k}" ${k === ((v && v.purchase_rule) || 'low') ? 'selected' : ''}>${l}</option>`).join('')}</select>
+    <div class="btn-row">
+      <div style="flex:1"><label class="field">Where from</label>
+        <input type="text" id="sp-store" value="${esc((v && v.store) || '')}" placeholder="e.g. Costco"></div>
+      <div style="flex:1"><label class="field">Kept at</label>
+        <select id="sp-loc">${locations.map((l) =>
+          `<option value="${esc(l.key)}" ${l.key === ((v && v.location_key) || 'evans') ? 'selected' : ''}>${l.emoji || ''} ${esc(l.name)}</option>`).join('')}</select></div>
+    </div>
+    <label class="field">Note (optional)</label>
+    <input type="text" id="sp-note" value="${esc((v && v.note) || '')}">
+    <button class="btn big" id="sp-save" style="margin-top:16px">${isNew ? 'Add it' : 'Save'}</button>
+    ${isNew ? '' : '<button class="btn danger small" id="sp-del" style="margin-top:10px">Remove from supplies</button>'}`);
+  $$('[data-state]', m).forEach((b) => b.onclick = () => {
+    $$('[data-state]', m).forEach((x) => x.classList.remove('on'));
+    b.classList.add('on');
+  });
+  $('#sp-save', m).onclick = async () => {
+    const name = $('#sp-name', m).value.trim();
+    if (!name) return toast('Give it a name first.');
+    const body = {
+      name, state: ($('[data-state].on', m) || {}).dataset?.state || 'ok',
+      purchase_rule: $('#sp-rule', m).value, store: $('#sp-store', m).value.trim(),
+      location_key: $('#sp-loc', m) ? $('#sp-loc', m).value : 'evans',
+      note: $('#sp-note', m).value.trim(),
+    };
+    await api(v ? `/api/inventory/${v.id}` : '/api/inventory', { method: v ? 'PATCH' : 'POST', body });
+    closeModal(); toast(v ? 'Saved.' : 'Added.'); setView('shopping');
+  };
+  if ($('#sp-del', m)) $('#sp-del', m).onclick = async () => {
+    if (!confirm(`Remove ${v.name} from supplies?`)) return;
+    await api(`/api/inventory/${v.id}`, { method: 'DELETE' });
+    closeModal(); toast('Removed.'); setView('shopping');
+  };
+}
 
 // MY LISTS — the Costco list, the packing list. Nothing here chases her: a list
 // is somewhere to put things, not somewhere to be nagged from.
@@ -1512,14 +1600,18 @@ async function makeGptKey(schemaUrl) {
     <h2>🤖 Connect ChatGPT</h2>
     <p class="sub">This takes a few minutes on a computer, and you only do it once.</p>
     <div class="card sage" style="font-size:.9em">
-      <b>In ChatGPT</b>
+      <b>You need a Custom GPT — a saved ChatGPT you can add tools to</b>
+      <p style="margin:6px 0 0">If you already talk to a Sage in ChatGPT, that is an ordinary conversation, not a
+      Custom GPT. Making one takes a few minutes on a computer, and needs a paid ChatGPT plan.</p>
       <ol style="margin:8px 0 0 -12px;line-height:1.75">
-        <li>Open your <b>Sage</b> GPT → <b>Edit</b> → <b>Configure</b></li>
-        <li>Scroll down to <b>Actions</b> → <b>Create new action</b></li>
+        <li>In ChatGPT on a computer, open the sidebar → <b>GPTs</b> → <b>+ Create</b></li>
+        <li>Choose the <b>Configure</b> tab and name it <b>Sage</b></li>
+        <li>Scroll to <b>Actions</b> → <b>Create new action</b></li>
         <li>Under Schema choose <b>Import from URL</b> and paste the first box below</li>
-        <li>Under Authentication choose <b>API Key</b>, type <b>Bearer</b>, and paste the second box</li>
-        <li>Save, and update your GPT</li>
+        <li>Under Authentication choose <b>API Key</b>, Auth Type <b>Bearer</b>, and paste the second box</li>
+        <li><b>Save</b>, then <b>Update</b> the GPT (top right)</li>
       </ol>
+      <p style="margin:8px 0 0">Then ask it something like “what have I got on this week?”</p>
     </div>
     <label class="field">1. Schema URL</label>
     <div class="btn-row"><input type="text" id="gpt-url" value="${esc(r.schema_url || schemaUrl)}" readonly style="flex:1">
@@ -1620,8 +1712,12 @@ async function renderICloudBox() {
     $('#ic-sync').disabled = true;
     $('#ic-sync').textContent = 'Checking…';
     const r = await api('/api/calendar/sync', { method: 'POST' });
-    toast(r.errors && r.errors.length ? r.errors[0] : `Up to date — ${r.events || 0} appointments and ${r.reminders || 0} reminders.`,
-      r.errors && r.errors.length ? 9000 : 5000);
+    // "Up to date" is not an answer when she is looking for something she
+    // added an hour ago. Say whether anything new actually arrived.
+    const fresh = r.added
+      ? `${r.added} new appointment${r.added === 1 ? '' : 's'} came across.`
+      : `Nothing new — still ${r.events || 0} appointment${r.events === 1 ? '' : 's'}. If something is missing, check which calendar it was saved to on your phone.`;
+    toast(r.errors && r.errors.length ? r.errors[0] : fresh, r.errors && r.errors.length ? 9000 : 7000);
     renderICloudBox();
   };
   if ($('#ic-probe')) $('#ic-probe').onclick = async () => {

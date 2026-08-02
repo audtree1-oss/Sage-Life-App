@@ -1958,6 +1958,9 @@ app.post('/api/preferences/gentle-mornings', (req, res) => {
 app.get('/api/views/today', async (req, res) => {
   const uid = req.user.id;
   const date = req.query.date || today();
+  // Refresh in the background here too: she often adds something on her
+  // phone and then looks at Today rather than Now.
+  syncCalendars(uid).catch(() => {});
   const ctx = await buildContext(uid, date);
   const p = partitionItems(uid, ctx);
   const routines = await activeRoutines(uid, date, ctx);
@@ -1976,6 +1979,9 @@ app.get('/api/views/today', async (req, res) => {
 
 app.get('/api/views/week', async (req, res) => {
   const uid = req.user.id;
+  // Refresh in the background here too: she often adds something on her
+  // phone and then looks at Today rather than Now.
+  syncCalendars(uid).catch(() => {});
   const ctx = await buildContext(uid);
   const p = partitionItems(uid, ctx);
   const end = daysFromNow(7);
@@ -2781,7 +2787,9 @@ app.post('/api/ask', async (req, res) => {
 // Sage never writes to her calendar; Apple Calendar stays the system of record.
 // ---------------------------------------------------------------------------
 const caldav = require('./caldav');
-const CAL_SYNC_MINUTES = 30;
+// She adds an appointment on her phone and looks at Sage a few minutes later.
+// Half an hour of "nothing there" reads as broken.
+const CAL_SYNC_MINUTES = 8;
 const CAL_WINDOW_BACK = 7;
 const CAL_WINDOW_FORWARD = 180;
 
@@ -2811,6 +2819,7 @@ async function syncCalendars(uid, { force = false } = {}) {
   const to = daysFromNow(CAL_WINDOW_FORWARD);
   const seen = new Set();
   const seenReminders = new Set();
+  const knownBefore = new Set(db.prepare('SELECT uid FROM cal_events WHERE user_id = ?').all(uid).map((r) => r.uid));
   const errors = [];
   const okCals = new Set();      // sources that answered cleanly this round
   const okLists = new Set();
@@ -2927,7 +2936,8 @@ async function syncCalendars(uid, { force = false } = {}) {
 
   db.prepare(`INSERT INTO preferences (user_id, key, value) VALUES (?, 'cal_last_sync', ?)
     ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value`).run(uid, new Date().toISOString());
-  return { connected: true, events: seen.size, reminders: seenReminders.size, errors };
+  const added = [...seen].filter((u) => !knownBefore.has(u)).length;
+  return { connected: true, events: seen.size, added, reminders: seenReminders.size, errors };
 }
 
 app.post('/api/calendar/connect', async (req, res) => {
