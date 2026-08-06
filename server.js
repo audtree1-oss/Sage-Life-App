@@ -193,6 +193,15 @@ CREATE TABLE IF NOT EXISTS routine_steps (
   text TEXT NOT NULL,
   sort INTEGER NOT NULL DEFAULT 0
 );
+-- A routine she has called up for one particular day. "When it rains" is right
+-- almost always; the exception is the day she looks at the sky herself and
+-- decides. An explicit ask beats every trigger, including suppression.
+CREATE TABLE IF NOT EXISTS routine_today (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  routine_id INTEGER NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
+  date TEXT NOT NULL,
+  PRIMARY KEY (user_id, routine_id, date)
+);
 CREATE TABLE IF NOT EXISTS routine_done (
   id INTEGER PRIMARY KEY,
   routine_id INTEGER NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
@@ -1180,6 +1189,8 @@ async function buildContext(uid, date = today()) {
     date, dow: dowOf(date), month: monthOf(date),
     hour: hourNow(),
     locations: locs, here, hereKey,
+    pinnedRoutines: new Set(db.prepare('SELECT routine_id FROM routine_today WHERE user_id = ? AND date = ?')
+      .all(uid, date).map((r) => r.routine_id)),
     activeTrip, upcomingTrip,
     weather, events, reminders, eventKinds, hostingSoon,
     tripDeparture: upcomingTrip && upcomingTrip.start_date <= daysFrom(date, 1) ? upcomingTrip : null,
@@ -1189,6 +1200,8 @@ async function buildContext(uid, date = today()) {
 
 // Is this routine relevant, given today's context?
 function routineActive(r, ctx) {
+  // She asked for it today. Nothing else gets a vote.
+  if (ctx.pinnedRoutines && ctx.pinnedRoutines.has(r.id)) return true;
   const cfg = safeJSON(r.trigger_config, {});
   const sup = safeJSON(r.suppress_if, {});
   // Conditional suppression, e.g. no home PT rounds on a PT appointment day.
@@ -1594,7 +1607,9 @@ app.get('/api/routines', async (req, res) => {
   const date = req.query.date || today();
   if (req.query.all === '1') {
     const rows = db.prepare('SELECT * FROM routines WHERE user_id = ? ORDER BY sort, id').all(req.user.id);
-    return res.json(rows.map((r) => routineWithSteps(r, date)));
+    const pinned = new Set(db.prepare('SELECT routine_id FROM routine_today WHERE user_id = ? AND date = ?')
+      .all(req.user.id, date).map((x) => x.routine_id));
+    return res.json(rows.map((r) => ({ ...routineWithSteps(r, date), pinned: pinned.has(r.id) })));
   }
   res.json(await activeRoutines(req.user.id, date));
 });
@@ -1634,6 +1649,23 @@ app.patch('/api/routines/:id', (req, res) => {
 app.delete('/api/routines/:id', (req, res) => {
   db.prepare('DELETE FROM routines WHERE id = ? AND user_id = ?').run(req.params.id, req.user.id);
   res.json({ ok: true });
+});
+
+// "How can I make this routine show up?" — this is how.
+app.post('/api/routines/:id/today', (req, res) => {
+  const r = db.prepare('SELECT * FROM routines WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
+  if (!r) return res.status(404).json({ error: 'No such routine.' });
+  const date = String((req.body || {}).date || today());
+  const on = (req.body || {}).on !== false;
+  if (on) {
+    db.prepare('INSERT OR IGNORE INTO routine_today (user_id, routine_id, date) VALUES (?, ?, ?)')
+      .run(req.user.id, r.id, date);
+    logHistory(req.user.id, 'routine', r.id, 'called up for today', r.name);
+  } else {
+    db.prepare('DELETE FROM routine_today WHERE user_id = ? AND routine_id = ? AND date = ?')
+      .run(req.user.id, r.id, date);
+  }
+  res.json({ ok: true, on });
 });
 
 app.post('/api/routines/:id/step/:stepId', (req, res) => {
