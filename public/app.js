@@ -808,11 +808,14 @@ VIEWS.routines = async function renderRoutines() {
           <span aria-hidden="true" style="color:var(--ink-soft)">${open ? '⌄' : '›'}</span>
         </div>
         ${open ? `
-          <div class="quiet" style="margin-top:6px">${esc(describeTrigger(r))}</div>
-          ${live
-            ? routineBlock(live, { bare: true })
-            : `<ol class="quiet" style="margin:8px 0 0 -14px;line-height:1.6">${r.steps.map((st) => `<li>${esc(st.text)}</li>`).join('') || '<li>No steps yet.</li>'}</ol>`}
-          <button class="btn ghost small" data-rt-edit="${r.id}" style="margin-top:10px">Change this routine</button>`
+          <div class="quiet" style="margin-top:6px">${esc(describeTrigger(r))}${r.pinned ? ' — and you asked for it today' : ''}</div>
+          ${routineBlock(live || r, { bare: true })}
+          <div class="btn-row" style="margin-top:10px">
+            ${live && !r.pinned ? ''
+              : `<button class="btn ${r.pinned ? 'ghost' : ''} small" data-rt-today="${r.id}" data-on="${r.pinned ? '0' : '1'}" style="flex:1">${
+                  r.pinned ? 'Take it off today' : 'Do this one today'}</button>`}
+            <button class="btn ghost small" data-rt-edit="${r.id}" style="flex:1">Change this routine</button>
+          </div>`
         : ''}
       </div>`;
     }).join('') || '<div class="empty">No routines yet.</div>'}
@@ -832,6 +835,13 @@ VIEWS.routines = async function renderRoutines() {
   });
   $$('[data-rt-edit]').forEach((b) => b.onclick = () => {
     openRoutine(all.find((r) => r.id === +b.dataset.rtEdit));
+  });
+  $$('[data-rt-today]').forEach((b) => b.onclick = async () => {
+    const on = b.dataset.on === '1';
+    await api(`/api/routines/${b.dataset.rtToday}/today`, { method: 'POST', body: { on } });
+    OPEN_ROUTINES.add(+b.dataset.rtToday);
+    toast(on ? 'Added to today.' : 'Taken off today.');
+    setView('routines');
   });
   $('[data-back]').onclick = () => setView('more');
 };
